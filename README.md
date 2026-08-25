@@ -1,61 +1,35 @@
-# Samsung QuickShell QML OSD
-
-![pic.png](pic.png)
-
-A custom QuickShell QML On-Screen Display (OSD) designed specifically for managing, debloating, and interacting with **Samsung** Android devices directly from your Linux desktop via ADB (Android Debug Bridge) and `scrcpy`.
-
----
-
-## Features
-* **Device Control Dashboard:** Quick interface overlay for executing ADB commands and managing system packages.
-* **Samsung Package Management:** Safely target and toggle Samsung bloatware packages (`com.samsung.android.*`).
-* **File & Screen Utilities:** Push wallpapers, files, or mirror your device screen seamlessly using integrated tools.
-
----
-
-## Prerequisites: Installing ADB on Arch Linux
-
-To interface with your Samsung phone, you need to install the Android Debug Bridge (`android-tools`) on Arch Linux. 
-
-Run the following command in your terminal using `pacman`:
-
-```bash
-sudo pacman -S android-tools
-
-
 Setting Up Your Samsung Phone for USB Debugging
 Before the QuickShell OSD can communicate with your phone, you must enable Developer Options and USB Debugging:
-1. Unlock Developer Mode:
+
+Unlock Developer Mode:
 25/08/2026, 18:11 Fixing Adb Shell Top Scrolling
 https://gemini.google.com/app/5b12ce073939f174?pli=1 167/171
 Open your phone Settings.
 Scroll down and tap About phone -> Software information.
 Locate the Build number row and tap it 7 times consecutively. Enter your lock screen PIN/pattern when prompted. You will see a
-toast notification saying "Developer mode has been turned on".
-2. Enable USB Debugging:
+toast notification saying “Developer mode has been turned on”.
+Enable USB Debugging:
 Go back to the main Settings menu.
 Scroll down to the newly unlocked Developer options at the very bottom.
 Scroll down inside Developer Options and toggle USB debugging to ON.
-3. Authorize Your Computer:
+Authorize Your Computer:
 Connect your Samsung phone to your Arch Linux machine via USB.
-A prompt will appear on your phone screen asking: "Allow USB debugging?"
-Check the box for "Always allow from this computer" and tap Allow.
-4. Confirm Connection: Run adb devices again in your terminal. Your device serial number should now show up next to the word
+A prompt will appear on your phone screen asking: “Allow USB debugging?”
+Check the box for “Always allow from this computer” and tap Allow.
+Confirm Connection: Run adb devices again in your terminal. Your device serial number should now show up next to the word
 device instead of unauthorized.
 User prompt: no make everything so i can copy it
 Response: # Samsung QuickShell QML OSD
-![pic.png](pic.png)
+pic.png
 A custom QuickShell QML On-Screen Display (OSD) designed specifically for managing, debloating, and interac
----
-## Features
-* **Device Control Dashboard:** Quick interface overlay for executing ADB commands and managing system pack
-* **Samsung Package Management:** Safely target and toggle Samsung bloatware packages (`com.samsung.android
-* **File & Screen Utilities:** Push wallpapers, files, or mirror your device screen seamlessly using integr
----
-## Prerequisites: Installing ADB on Arch Linux
-To interface with your Samsung phone, you need to install the Android Debug Bridge (`android-tools`) on Arc
-Run the following command in your terminal using `pacman`:
-```bash
+Features
+Device Control Dashboard: Quick interface overlay for executing ADB commands and managing system pack
+Samsung Package Management: Safely target and toggle Samsung bloatware packages (`com.samsung.android
+File & Screen Utilities: Push wallpapers, files, or mirror your device screen seamlessly using integr
+Prerequisites: Installing ADB on Arch Linux
+To interface with your Samsung phone, you need to install the Android Debug Bridge (android-tools) on Arc
+Run the following command in your terminal using pacman:
+
 sudo pacman -S android-tools
 (Optional) If you also want to mirror and control your phone screen directly from your desktop, install scrcpy as well:
 sudo pacman -S scrcpy
@@ -193,4 +167,4 @@ Reboot Tab: Quickly boot your phone into Recovery Mode or Bootloader/Fastboot mo
 Shared Tab: Drag and drop files directly into the OSD area to upload them to /sdcard/SharedPC on your phone, or click Pull to PC to
 download files back to your local ~/Downloads/ folder.
 Monitor Tab: View live CPU and memory performance stats (top) streamed directly from your device.
-Show/Close Phone Button: Instantly toggle a docked, borderless scrcpy window to interact with your phone screen right next to the
+Show/Close Phone Button: Instantly to
