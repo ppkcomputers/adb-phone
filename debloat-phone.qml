@@ -11,6 +11,8 @@ ShellRoot {
     property var appsToEnable: ([])
     property var launchableApps: ([])
     property bool isPhoneVisible: false
+    property bool isFDroidInstalled: false
+    property bool searchAttempted: false
 
     property string phoneManufacturer: "Unknown"
     property string phoneModel: "Unknown"
@@ -550,16 +552,30 @@ ShellRoot {
                                     }
                                 }
 
-                                ScrollView {
+                                Item {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    clip: true
 
-                                    ListView {
-                                        id: searchResultsListView
-                                        model: ListModel { id: searchResultsModel }
-                                        spacing: 6
-                                        delegate: pkgDelegate
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: searchResultsModel.count === 0 && searchAttempted
+                                        text: "no app found"
+                                        color: "#b0ac63"
+                                        font.pixelSize: 14
+                                        font.family: "Monospace"
+                                    }
+
+                                    ScrollView {
+                                        anchors.fill: parent
+                                        visible: searchResultsModel.count > 0
+                                        clip: true
+
+                                        ListView {
+                                            id: searchResultsListView
+                                            model: ListModel { id: searchResultsModel }
+                                            spacing: 6
+                                            delegate: pkgDelegate
+                                        }
                                     }
                                 }
                             }
@@ -1110,12 +1126,13 @@ ShellRoot {
 
                         onClicked: {
                             if (isPhoneVisible) {
-                                killScrcpyProc.running = true;
+                                scrcpyReconnectTimer.stop();
                                 isPhoneVisible = false;
+                                killScrcpyProc.running = true;
                             } else {
+                                isPhoneVisible = true;
                                 killScrcpyProc.running = false;
                                 startScrcpyProc.running = true;
-                                isPhoneVisible = true;
                             }
                         }
                     }
@@ -1146,6 +1163,36 @@ ShellRoot {
                         }
 
                         onClicked: runDiagnostics()
+                    }
+
+                    Button {
+                        id: fdroidBtn
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 240
+                        height: 44
+                        visible: tabBar.currentIndex === 1 && !isFDroidInstalled
+                        text: "F-Droid"
+                        font.pixelSize: 14
+                        font.family: "Monospace"
+                        scale: pressed ? 0.96 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                        background: Rectangle {
+                            radius: 8
+                            color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                            border.color: Qt.darker("#555839", 1.2)
+                            border.width: 1
+                        }
+
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: "#dde5a2"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        onClicked: installFDroidProc.running = true
                     }
 
                     Button {
@@ -1349,6 +1396,7 @@ ShellRoot {
             stdout: StdioCollector {
                 onStreamFinished: {
                     searchResultsModel.clear();
+                    searchAttempted = true;
                     let lines = text.trim().split("\n");
                     let term = searchPhoneProc.queryTerm.toLowerCase();
 
@@ -1375,6 +1423,17 @@ ShellRoot {
         }
 
         Process {
+            id: installFDroidProc
+            command: ["bash", "-c", "curl -L -o /tmp/fdroid.apk https://f-droid.org/F-Droid.apk && adb push /tmp/fdroid.apk /data/local/tmp/fdroid.apk && adb shell pm install -r /data/local/tmp/fdroid.apk && adb shell monkey -p org.fdroid.fdroid -c android.intent.category.LAUNCHER 1"]
+            stdout: StdioCollector {
+                onStreamFinished: runDiagnostics()
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {}
+            }
+        }
+
+        Process {
             id: rebootRecoveryProc
             command: ["adb", "reboot", "recovery"]
             stdout: StdioCollector { onStreamFinished: {} }
@@ -1383,9 +1442,21 @@ ShellRoot {
 
         Process {
             id: rebootBootloaderProc
-            command: ["adb", "reboot", "bootloader"]
+            command: ["adb", "reboot", "download"]
             stdout: StdioCollector { onStreamFinished: {} }
             stderr: StdioCollector { onStreamFinished: {} }
+        }
+
+        Timer {
+            id: scrcpyReconnectTimer
+            interval: 3000
+            repeat: false
+            running: false
+            onTriggered: {
+                if (isPhoneVisible && !startScrcpyProc.running && !killScrcpyProc.running) {
+                    startScrcpyProc.running = true;
+                }
+            }
         }
 
         Process {
@@ -1405,13 +1476,25 @@ ShellRoot {
             ]
 
             stdout: StdioCollector {
-                onStreamFinished: console.log("[SCRCPY STDOUT]:\n" + text.trim())
+                onStreamFinished: {
+                    if (text.trim().length > 0) {
+                        console.log("[SCRCPY STDOUT]: " + text.trim());
+                    }
+                }
             }
             stderr: StdioCollector {
-                onStreamFinished: console.log("[SCRCPY STDERR]:\n" + text.trim())
+                onStreamFinished: {
+                    if (text.trim().length > 0) {
+                        console.log("[SCRCPY STDERR]: " + text.trim());
+                    }
+                }
             }
             onExited: (code, status) => {
-                isPhoneVisible = false;
+                if (isPhoneVisible && code !== 0) {
+                    scrcpyReconnectTimer.start();
+                } else if (code === 0) {
+                    isPhoneVisible = false;
+                }
             }
         }
 
@@ -1419,7 +1502,7 @@ ShellRoot {
             id: killScrcpyProc
             command: ["pkill", "-f", "OSD_SCRCPY_EMBED"]
             onExited: (code, status) => {
-                isPhoneVisible = false;
+                // Handled cleanly by button trigger
             }
         }
 
@@ -1429,10 +1512,25 @@ ShellRoot {
             stdout: StdioCollector {
                 onStreamFinished: {
                     if (text.trim().length > 0) {
-                        checkDevicesProc.running = true;
+                        startupRestartAdbProc.running = true;
                     } else {
                         showMissingAdbGuide();
                     }
+                }
+            }
+        }
+
+        Process {
+            id: startupRestartAdbProc
+            command: ["sh", "-c", "adb kill-server && adb start-server"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    checkDevicesProc.running = true;
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    checkDevicesProc.running = true;
                 }
             }
         }
@@ -1609,13 +1707,14 @@ ShellRoot {
             searchPhoneProc.queryTerm = term;
             searchPhoneProc.running = true;
         } else {
+            searchAttempted = false;
             searchResultsModel.clear();
         }
     }
 
     function runDiagnostics() {
         statusScrollView.visible = true;
-        statusText.text = "Checking Linux dependencies...\n";
+        statusText.text = "Checking Linux dependencies & restarting ADB daemon...\n";
         checkAdbProc.running = true;
     }
 
@@ -1689,6 +1788,8 @@ ShellRoot {
 
         let activeList = parsePackages(installedText);
         let allList = parsePackages(uninstalledText);
+
+        isFDroidInstalled = activeList.indexOf("org.fdroid.fdroid") !== -1;
 
         let combinedMap = {};
         for (let i = 0; i < allList.length; i++) {
