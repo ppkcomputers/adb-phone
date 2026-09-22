@@ -13,14 +13,26 @@ ShellRoot {
     property bool isPhoneVisible: false
     property bool isFDroidInstalled: false
     property bool searchAttempted: false
+    property string pendingPlayStorePkg: ""
 
     property string phoneManufacturer: "Unknown"
     property string phoneModel: "Unknown"
     property string phoneAndroid: "Unknown"
     property string phoneSerial: "Unknown"
 
-    // Remote folder path created and accessed on the Android device
-    property string remoteSharedFolder: "/sdcard/SharedPC"
+    // Dynamic Storage Properties
+    property string storageTotal: "-"
+    property string storageUsed: "-"
+    property string storageAvail: "-"
+
+    // Target Android Download folder path
+    property string remoteSharedFolder: "/sdcard/Download"
+
+    // Malware Scanner Properties
+    property bool depsInstalled: false
+    property string scanStatusMessage: ""
+    property string detectedInfectedFile: ""
+    property bool isScanning: false
 
     property var friendlyNames: ({
         "com.google.android.gm": "Gmail",
@@ -685,35 +697,30 @@ ShellRoot {
 
                             function readDirectoryContents() {
                                 sharedFolderModel.clear();
-                                sharedFileProc.mode = "list";
-                                sharedFileProc.command = ["adb", "shell", "ls", remoteSharedFolder];
+                                sharedFileProc.command = ["adb", "shell", "ls", "-1p", remoteSharedFolder + "/"];
                                 sharedFileProc.running = true;
                             }
 
                             function onTabSelected() {
-                                sharedFolderModel.clear();
-                                sharedFileProc.mode = "ensure_dir";
-                                sharedFileProc.command = ["adb", "shell", "mkdir", "-p", remoteSharedFolder];
-                                sharedFileProc.running = true;
+                                readDirectoryContents();
                             }
 
                             Process {
                                 id: sharedFileProc
-                                property string mode: ""
                                 command: []
 
                                 stdout: SplitParser {
                                     onRead: data => {
-                                        let line = data.trim();
-                                        if (line.length > 0) {
-                                            sharedFolderModel.append({ entryName: line });
-                                        }
-                                    }
-                                }
+                                        let fileName = data.trim();
+                                        if (fileName.length > 0 && fileName !== "." && fileName !== "..") {
+                                            let isDir = fileName.endsWith("/");
+                                            let cleanName = isDir ? fileName.slice(0, -1) : fileName;
 
-                                onExited: exitCode => {
-                                    if (sharedFileProc.mode === "ensure_dir" && exitCode === 0) {
-                                        sharedTabHelper.readDirectoryContents();
+                                            sharedFolderModel.append({
+                                                entryName: cleanName,
+                                                fileName: cleanName
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -872,13 +879,13 @@ ShellRoot {
                                                 contentItem: RowLayout {
                                                     spacing: 10
                                                     Text {
-                                                        text: "📁"
+                                                        text: model.fileName !== "" ? "📁" : "📄"
                                                         font.pixelSize: 14
                                                     }
                                                     Text {
                                                         text: model.entryName
                                                         color: "#dde5a2"
-                                                        font.pixelSize: 13
+                                                        font.pixelSize: 12
                                                         font.family: "Monospace"
                                                         Layout.fillWidth: true
                                                         elide: Text.ElideMiddle
@@ -888,6 +895,7 @@ ShellRoot {
                                                         width: 90
                                                         height: 28
                                                         text: "Pull to PC"
+                                                        visible: model.fileName !== ""
                                                         font.pixelSize: 11
                                                         font.family: "Monospace"
                                                         scale: pressed ? 0.96 : 1.0
@@ -909,10 +917,10 @@ ShellRoot {
                                                         }
 
                                                         onClicked: {
-                                                            let fileName = model.entryName;
-                                                            adbPullProc.pulledFileName = fileName;
-                                                            adbPullProc.command = ["bash", "-c", "adb pull \"" + remoteSharedFolder + "/" + fileName + "\" \"$HOME/Downloads/\""];
-                                                            statusNoticeText.text = "Pulling " + fileName + "...";
+                                                            let fName = model.fileName;
+                                                            adbPullProc.pulledFileName = fName;
+                                                            adbPullProc.command = ["bash", "-c", "adb pull \"" + remoteSharedFolder + "/" + fName + "\" \"$HOME/Downloads/\""];
+                                                            statusNoticeText.text = "Pulling " + fName + "...";
                                                             adbPullProc.running = true;
                                                         }
                                                     }
@@ -1137,6 +1145,70 @@ ShellRoot {
                         }
                     }
 
+                    // Shared Tab - Scan Downloads / Quarantine Button Section
+                    ColumnLayout {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        visible: tabBar.currentIndex === 4
+                        spacing: 6
+
+                        Button {
+                            id: scanButton
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: 240
+                            Layout.preferredHeight: 44
+                            text: isScanning ? "Scanning..." : (detectedInfectedFile !== "" ? "Quarantine file" : "Scan Downloads")
+                            font.pixelSize: 14
+                            font.family: "Monospace"
+                            enabled: !isScanning
+                            scale: pressed ? 0.96 : 1.0
+                            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                            background: Rectangle {
+                                radius: 8
+                                color: parent.pressed ? Qt.darker(detectedInfectedFile !== "" ? "#5a2d2d" : "#363c30", 1.1) : (detectedInfectedFile !== "" ? "#4a2424" : "#363c30")
+                                border.color: detectedInfectedFile !== "" ? "#d9534f" : Qt.darker("#555839", 1.2)
+                                border.width: 1
+                            }
+
+                            contentItem: Text {
+                                text: parent.text
+                                font: parent.font
+                                color: detectedInfectedFile !== "" ? "#ff8888" : "#dde5a2"
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            onClicked: {
+                                if (!depsInstalled) {
+                                    scanStatusMessage = "ClamAV must be installed on your Linux machine to scan downloads.";
+                                    return;
+                                }
+
+                                if (detectedInfectedFile !== "") {
+                                    quarantineProc.command = ["adb", "shell", "rm", "-f", remoteSharedFolder + "/" + detectedInfectedFile];
+                                    quarantineProc.running = true;
+                                } else {
+                                    scanStatusMessage = "Scanning remote downloads folder via ADB...";
+                                    isScanning = true;
+                                    scanProc.running = true;
+                                }
+                            }
+                        }
+
+                        Text {
+                            id: scanStatusText
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: 380
+                            text: scanStatusMessage
+                            color: detectedInfectedFile !== "" ? "#ff7777" : "#dde5a2"
+                            font.pixelSize: 11
+                            font.family: "Monospace"
+                            wrapMode: Text.WordWrap
+                            horizontalAlignment: Text.AlignHCenter
+                            visible: scanStatusMessage.length > 0
+                        }
+                    }
+
                     Button {
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: 240
@@ -1165,34 +1237,100 @@ ShellRoot {
                         onClicked: runDiagnostics()
                     }
 
-                    Button {
-                        id: fdroidBtn
+                    Item {
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: 240
                         height: 44
-                        visible: tabBar.currentIndex === 1 && !isFDroidInstalled
-                        text: "F-Droid"
-                        font.pixelSize: 14
-                        font.family: "Monospace"
-                        scale: pressed ? 0.96 : 1.0
-                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+                        visible: tabBar.currentIndex === 1
 
-                        background: Rectangle {
-                            radius: 8
-                            color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
-                            border.color: Qt.darker("#555839", 1.2)
-                            border.width: 1
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 8
+
+                            Button {
+                                id: fdroidBtn
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                text: isFDroidInstalled ? "Open F-Droid" : "Install F-Droid"
+                                font.pixelSize: 14
+                                font.family: "Monospace"
+                                enabled: !installFDroidProc.running && !openFDroidProc.running
+                                scale: pressed ? 0.96 : 1.0
+                                Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                                background: Rectangle {
+                                    radius: 8
+                                    color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                                    border.color: Qt.darker("#555839", 1.2)
+                                    border.width: 1
+                                }
+
+                                contentItem: Text {
+                                    text: parent.text
+                                    font: parent.font
+                                    color: "#dde5a2"
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+
+                                onClicked: {
+                                    if (isFDroidInstalled) {
+                                        openFDroidProc.running = true;
+                                    } else {
+                                        installFDroidProc.running = true;
+                                    }
+                                }
+                            }
+
+                            ProgressBar {
+                                id: fdroidProgress
+                                Layout.preferredWidth: 80
+                                Layout.fillHeight: true
+                                visible: installFDroidProc.running
+                                indeterminate: true
+
+                                background: Rectangle {
+                                    color: "#1a1c18"
+                                    border.color: "#555839"
+                                    border.width: 1
+                                    radius: 6
+                                }
+
+                                contentItem: Item {
+                                    implicitWidth: 80
+                                    implicitHeight: 12
+
+                                    Rectangle {
+                                        id: bar
+                                        width: parent.width * 0.4
+                                        height: parent.height
+                                        radius: 6
+                                        color: "#dde5a2"
+
+                                        SequentialAnimation {
+                                            running: fdroidProgress.visible
+                                            loops: Animation.Infinite
+                                            NumberAnimation {
+                                                target: bar
+                                                property: "x"
+                                                from: 0
+                                                to: fdroidProgress.width - bar.width
+                                                duration: 800
+                                                easing.type: Easing.InOutQuad
+                                            }
+                                            NumberAnimation {
+                                                target: bar
+                                                property: "x"
+                                                from: fdroidProgress.width - bar.width
+                                                to: 0
+                                                duration: 800
+                                                easing.type: Easing.InOutQuad
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-
-                        contentItem: Text {
-                            text: parent.text
-                            font: parent.font
-                            color: "#dde5a2"
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-
-                        onClicked: installFDroidProc.running = true
                     }
 
                     Button {
@@ -1200,6 +1338,7 @@ ShellRoot {
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: 240
                         height: 44
+                        visible: tabBar.currentIndex === 0 || tabBar.currentIndex === 1
                         text: "Apply (" + (appsToUninstall.length + appsToEnable.length) + " Changes)"
                         font.pixelSize: 14
                         font.family: "Monospace"
@@ -1224,61 +1363,134 @@ ShellRoot {
 
                         onClicked: applyPendingChanges()
                     }
+
+                    Button {
+                        id: closeBtn
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 240
+                        height: 44
+                        text: "Close OSD"
+                        font.pixelSize: 14
+                        font.family: "Monospace"
+                        scale: pressed ? 0.96 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                        background: Rectangle {
+                            radius: 8
+                            color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                            border.color: Qt.darker("#555839", 1.2)
+                            border.width: 1
+                        }
+
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: "#dde5a2"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        onClicked: window.visible = false
+                    }
                 }
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 36
+                    height: 56
                     color: Qt.rgba(0.18, 0.20, 0.17, 0.8)
                     radius: 8
                     border.color: "#555839"
                     border.width: 1
 
-                    Row {
+                    Column {
                         anchors.centerIn: parent
-                        spacing: 12
+                        spacing: 4
 
-                        Text {
-                            text: "Make: " + phoneManufacturer
-                            color: "#dde5a2"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
+                        // Storage Information Line
+                        Row {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            spacing: 12
+
+                            Text {
+                                text: "Storage Total: " + storageTotal
+                                color: "#b0ac63"
+                                font.pixelSize: 11
+                                font.family: "Monospace"
+                                font.bold: true
+                            }
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 11
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "Used: " + storageUsed
+                                color: "#dde5a2"
+                                font.pixelSize: 11
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 11
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "Available: " + storageAvail
+                                color: "#dde5a2"
+                                font.pixelSize: 11
+                                font.family: "Monospace"
+                            }
                         }
-                        Text {
-                            text: "|"
-                            color: "#555839"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                        }
-                        Text {
-                            text: "Model: " + phoneModel
-                            color: "#dde5a2"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                        }
-                        Text {
-                            text: "|"
-                            color: "#555839"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                        }
-                        Text {
-                            text: "Android: " + phoneAndroid
-                            color: "#dde5a2"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                        }
-                        Text {
-                            text: "|"
-                            color: "#555839"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                        }
-                        Text {
-                            text: "Serial: " + phoneSerial
-                            color: "#dde5a2"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
+
+                        // Phone Info Line
+                        Row {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            spacing: 12
+
+                            Text {
+                                text: "Make: " + phoneManufacturer
+                                color: "#dde5a2"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "Model: " + phoneModel
+                                color: "#dde5a2"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "Android: " + phoneAndroid
+                                color: "#dde5a2"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+                            Text {
+                                text: "Serial: " + phoneSerial
+                                color: "#dde5a2"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
                         }
                     }
                 }
@@ -1382,8 +1594,79 @@ ShellRoot {
                                 }
                             }
                             recalculateChanges();
+
+                            if (newState) {
+                                pendingPlayStorePkg = currentPkg;
+                                playStoreConnectCheckProc.running = true;
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        Process {
+            id: checkDepsProc
+            command: ["which", "clamscan"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    if (text.trim().length > 0) {
+                        depsInstalled = true;
+                    } else {
+                        depsInstalled = false;
+                    }
+                }
+            }
+        }
+
+        Process {
+            id: scanProc
+            command: [
+                "bash", "-c",
+                "TMP_DIR=$(mktemp -d) && adb pull /sdcard/Download \"$TMP_DIR/Download\" >/dev/null 2>&1 && clamscan -r \"$TMP_DIR/Download\"; SCAN_RES=$?; rm -rf \"$TMP_DIR\"; exit $SCAN_RES"
+            ]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    isScanning = false;
+                    let output = text.trim();
+                    let lines = output.split("\n");
+                    let foundThreat = "";
+
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].includes("FOUND")) {
+                            let parts = lines[i].split(":");
+                            if (parts.length > 0) {
+                                let fullPath = parts[0].trim();
+                                foundThreat = fullPath.substring(fullPath.lastIndexOf("/") + 1);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (foundThreat !== "") {
+                        detectedInfectedFile = foundThreat;
+                        scanStatusMessage = "Infected file found: " + foundThreat;
+                    } else {
+                        detectedInfectedFile = "";
+                        scanStatusMessage = "it's clean";
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    isScanning = false;
+                }
+            }
+        }
+
+        Process {
+            id: quarantineProc
+            command: []
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    scanStatusMessage = "Quarantine successful: Removed " + detectedInfectedFile;
+                    detectedInfectedFile = "";
+                    sharedTabHelper.readDirectoryContents();
                 }
             }
         }
@@ -1431,6 +1714,54 @@ ShellRoot {
             stderr: StdioCollector {
                 onStreamFinished: {}
             }
+        }
+
+        Process {
+            id: openFDroidProc
+            command: ["adb", "shell", "monkey", "-p", "org.fdroid.fdroid", "-c", "android.intent.category.LAUNCHER", "1"]
+            stdout: StdioCollector { onStreamFinished: {} }
+            stderr: StdioCollector { onStreamFinished: {} }
+        }
+
+        Process {
+            id: playStoreConnectCheckProc
+            command: ["adb", "get-state"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    if (text.trim() === "device") {
+                        if (pendingPlayStorePkg !== "") {
+                            playStoreOpenProc.command = ["adb", "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "market://details?id=" + pendingPlayStorePkg];
+                            playStoreOpenProc.running = true;
+                            pendingPlayStorePkg = "";
+                        }
+                    } else {
+                        playStoreRetryTimer.restart();
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    playStoreRetryTimer.restart();
+                }
+            }
+        }
+
+        Timer {
+            id: playStoreRetryTimer
+            interval: 2000
+            repeat: false
+            onTriggered: {
+                if (pendingPlayStorePkg !== "") {
+                    playStoreConnectCheckProc.running = true;
+                }
+            }
+        }
+
+        Process {
+            id: playStoreOpenProc
+            command: []
+            stdout: StdioCollector { onStreamFinished: {} }
+            stderr: StdioCollector { onStreamFinished: {} }
         }
 
         Process {
@@ -1571,7 +1902,26 @@ ShellRoot {
             id: fetchPhoneInfoSerial
             command: ["adb", "get-serialno"]
             stdout: StdioCollector {
-                onStreamFinished: { phoneSerial = text.trim(); fetchLaunchersProc.running = true; }
+                onStreamFinished: { phoneSerial = text.trim(); fetchPhoneInfoStorage.running = true; }
+            }
+        }
+
+        Process {
+            id: fetchPhoneInfoStorage
+            command: ["adb", "shell", "df", "-h", "/sdcard"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let lines = text.trim().split("\n");
+                    if (lines.length > 1) {
+                        let parts = lines[lines.length - 1].trim().split(/\s+/);
+                        if (parts.length >= 4) {
+                            storageTotal = parts[1];
+                            storageUsed = parts[2];
+                            storageAvail = parts[3];
+                        }
+                    }
+                    fetchLaunchersProc.running = true;
+                }
             }
         }
 
@@ -1697,7 +2047,10 @@ ShellRoot {
             interval: 80
             running: true
             repeat: false
-            onTriggered: runDiagnostics()
+            onTriggered: {
+                checkDepsProc.running = true;
+                runDiagnostics();
+            }
         }
     }
 
