@@ -20,6 +20,10 @@ ShellRoot {
     property string phoneAndroid: "Unknown"
     property string phoneSerial: "Unknown"
 
+    // Battery & System Update Properties
+    property string phoneBatteryLevel: "-"
+    property bool isUpdateAvailable: false
+
     // Dynamic Storage Properties
     property string storageTotal: "-"
     property string storageUsed: "-"
@@ -183,39 +187,61 @@ ShellRoot {
         appsToEnable = enables;
     }
 
-    function sortModel(model) {
-        if (!model) return;
-        let items = [];
-        for (let i = 0; i < model.count; i++) {
-            let item = model.get(i);
-            if (item && item.rawPkg !== undefined && item.displayName !== undefined) {
-                items.push({
-                    displayName: item.displayName,
-                    rawPkg: item.rawPkg,
-                    isInstalled: item.isInstalled,
-                    originalState: item.originalState
-                });
-            }
+    function triggerPhoneSearch() {
+        let query = searchField.text.trim();
+        if (query.length === 0) return;
+        searchAttempted = true;
+        searchResultsModel.clear();
+        searchPhoneProc.queryTerm = query.toLowerCase();
+        searchPhoneProc.running = true;
+    }
+
+    function applyPendingChanges() {
+        pendingActionsQueue = [];
+        for (let i = 0; i < appsToUninstall.length; i++) {
+            pendingActionsQueue.push({ type: "uninstall", pkg: appsToUninstall[i] });
+        }
+        for (let i = 0; i < appsToEnable.length; i++) {
+            pendingActionsQueue.push({ type: "enable", pkg: appsToEnable[i] });
         }
 
-        items.sort(function(a, b) {
-            let activeA = a.isInstalled;
-            let activeB = b.isInstalled;
-            let isGoogleA = a.rawPkg.toLowerCase().includes("google") || a.rawPkg === "com.android.chrome";
-            let isGoogleB = b.rawPkg.toLowerCase().includes("google") || b.rawPkg === "com.android.chrome";
+        statusScrollView.visible = true;
+        statusText.text = "Starting package state updates...\n";
+        processNextAction();
+    }
 
-            if (!isGoogleA && !isGoogleB) {
-                if (activeA !== activeB) return activeA ? -1 : 1;
-            }
-
-            if (activeA === activeB) return a.displayName.localeCompare(b.displayName);
-            return activeA ? -1 : 1;
-        });
-
-        model.clear();
-        for (let i = 0; i < items.length; i++) {
-            model.append(items[i]);
+    function processNextAction() {
+        if (pendingActionsQueue.length === 0) {
+            statusText.text += "\nFinished applying changes. Refreshing package list...\n";
+            runDiagnostics();
+            return;
         }
+
+        let action = pendingActionsQueue.shift();
+        actionProc.currentPkg = action.pkg;
+        actionProc.isFallbackMode = false;
+
+        if (action.type === "uninstall") {
+            statusText.text += "Uninstalling " + action.pkg + "...\n";
+            actionProc.command = ["adb", "shell", "pm", "uninstall", "-k", "--user", "0", action.pkg];
+        } else if (action.type === "enable") {
+            statusText.text += "Enabling/Installing " + action.pkg + "...\n";
+            actionProc.command = ["adb", "shell", "cmd", "package", "install-existing", action.pkg];
+        }
+        actionProc.running = true;
+    }
+
+    function runDiagnostics() {
+        checkDepsProc.running = true;
+        fetchBatteryProc.running = true;
+        checkUpdateProc.running = true;
+    }
+
+    property var pendingActionsQueue: []
+
+    QtObject {
+        id: statusScrollView
+        property bool visible: false
     }
 
     PanelWindow {
@@ -241,6 +267,19 @@ ShellRoot {
             border.color: "#555839"
             border.width: 1
             radius: 16
+
+            Image {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.topMargin: 200
+
+                width: parent.width * 1.1
+                height: parent.height
+                source: "setele.png"
+                opacity: 0.4
+                fillMode: Image.PreserveAspectFit
+                layer.enabled: true
+            }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -269,7 +308,7 @@ ShellRoot {
                 TabBar {
                     id: tabBar
                     Layout.fillWidth: true
-                    spacing: 6
+                    spacing: 2
                     background: Rectangle { color: "transparent" }
 
                     onCurrentIndexChanged: {
@@ -279,6 +318,10 @@ ShellRoot {
                             sharedTabHelper.onTabSelected();
                         } else if (currentIndex === 5) {
                             monitoringTabHelper.onTabSelected();
+                        } else if (currentIndex === 6) {
+                            secureTabHelper.checkTelemetry();
+                            secureTabHelper.fetchBatteryOptimization();
+                            secureTabHelper.checkSpeedup();
                         } else {
                             monitoringTabHelper.onTabDeselected();
                         }
@@ -412,6 +455,30 @@ ShellRoot {
 
                         contentItem: Text {
                             text: "Monitor"
+                            color: parent.checked ? "#dde5a2" : "#888888"
+                            font.pixelSize: 12
+                            font.family: "Monospace"
+                            font.bold: parent.checked
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        background: Rectangle {
+                            color: parent.checked ? "#363c30" : "transparent"
+                            border.color: parent.checked ? "#555839" : "transparent"
+                            border.width: 1
+                            radius: 6
+                        }
+                    }
+
+                    TabButton {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 38
+                        scale: pressed ? 0.96 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                        contentItem: Text {
+                            text: "Secure\nPhone"
                             color: parent.checked ? "#dde5a2" : "#888888"
                             font.pixelSize: 12
                             font.family: "Monospace"
@@ -632,7 +699,7 @@ ShellRoot {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: "⚠️ Reboots your phone into Recovery Mode. Used for system updates, wiping caches, factory resets, or sideloading packages."
+                                        text: "⚠️️ Reboots your phone into Recovery Mode. Used for system updates, wiping caches, factory resets, or sideloading packages."
                                         color: "#b0ac63"
                                         font.pixelSize: 12
                                         font.family: "Monospace"
@@ -919,7 +986,7 @@ ShellRoot {
                                                         onClicked: {
                                                             let fName = model.fileName;
                                                             adbPullProc.pulledFileName = fName;
-                                                            adbPullProc.command = ["bash", "-c", "adb pull \"" + remoteSharedFolder + "/" + fName + "\" \"$HOME/Downloads/\""];
+                                                            adbPullProc.command = ["adb", "pull", remoteSharedFolder + "/" + fName, Qt.resolvedUrl("~/Downloads").toString().replace("file://", "")];
                                                             statusNoticeText.text = "Pulling " + fName + "...";
                                                             adbPullProc.running = true;
                                                         }
@@ -1096,6 +1163,791 @@ ShellRoot {
                                         color: "#b0ac63"
                                         font.pixelSize: 12
                                         font.family: "Monospace"
+                                    }
+                                }
+                            }
+                        }
+
+                        // Secure Phone Tab View
+                        Item {
+                            id: secureTabHelper
+
+                            ListModel {
+                                id: secureTelemetryModel
+                            }
+
+                            ListModel {
+                                id: batteryOptimizationModel
+                            }
+
+                            ListModel {
+                                id: speedupModel
+                            }
+
+                            property bool isChecking: false
+                            property bool isBatteryChecking: false
+                            property bool isSpeedupChecking: false
+
+                            function fetchBatteryOptimization() {
+                                batteryOptimizationModel.clear();
+                                isBatteryChecking = true;
+                                console.log("[BATTERY OPT]: Executing query for un-optimized background packages...");
+                                fetchBatteryOptProc.running = true;
+                            }
+
+                            function checkTelemetry() {
+                                secureTelemetryModel.clear();
+                                isChecking = true;
+                                console.log("[TELEMETRY SCAN]: Starting full ADB system scan for active telemetry settings...");
+                                auditTelemetryProc.running = true;
+                            }
+
+                            function checkSpeedup() {
+                                speedupModel.clear();
+                                isSpeedupChecking = true;
+                                speedupAuditProc.running = true;
+                                autoTrimCacheProc.running = true;
+                            }
+
+                            Process {
+                                id: autoTrimCacheProc
+                                command: ["adb", "shell", "pm", "trim-caches", "128G"]
+                            }
+
+                            Process {
+                                id: speedupAuditProc
+                                command: [
+                                    "bash", "-c",
+                                    "av_pkgs=$(adb shell pm list packages | grep -iE 'avast|avg|kaspersky|bitdefender|malwarebytes|mcafee|norton|lookout|drweb|eset|avira' | sed 's/package://'); " +
+                                    "top_out=$(adb shell top -b -n 1); " +
+                                    "for pkg in $av_pkgs; do " +
+                                    "  if echo \"$top_out\" | grep -q \"$pkg\"; then " +
+                                    "    echo \"AV|$pkg|is hogging phone resources\"; " +
+                                    "  else " +
+                                    "    echo \"AV|$pkg|installed\"; " +
+                                    "  fi; " +
+                                    "done; " +
+                                    "if echo \"$top_out\" | grep -q 'com.android.vending'; then " +
+                                    "  echo \"PLAY|com.android.vending|Google Play Store is hogging resources\"; " +
+                                    "fi"
+                                ]
+
+                                stdout: StdioCollector {
+                                    onStreamFinished: {
+                                        speedupModel.clear();
+                                        secureTabHelper.isSpeedupChecking = false;
+                                        let lines = text.trim().split("\n");
+
+                                        for (let i = 0; i < lines.length; i++) {
+                                            let line = lines[i].trim();
+                                            if (line.length > 0) {
+                                                let parts = line.split("|");
+                                                if (parts.length === 3) {
+                                                    speedupModel.append({
+                                                        type: parts[0],
+                                                        rawPkg: parts[1],
+                                                        displayName: parts[0] === "PLAY" ? "Google Play Store" : formatDisplayName(parts[1]),
+                                                                        statusText: parts[2],
+                                                                        isToggledOn: true
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                stderr: StdioCollector {
+                                    onStreamFinished: {
+                                        secureTabHelper.isSpeedupChecking = false;
+                                    }
+                                }
+                            }
+
+                            Process {
+                                id: speedupActionProc
+                                command: []
+                            }
+
+                            Process {
+                                id: auditTelemetryProc
+                                command: [
+                                    "bash", "-c",
+                                    "for item in " +
+                                    "'App Crash Analytics|system|send_action_app_error|0' " +
+                                    "'Security Diagnostics|system|send_security_reports|0' " +
+                                    "'Samsung Diagnostic Agreement|system|samsung_errorlog_agree|0' " +
+                                    "'Personalization Service API|global|settings_use_psd_api|0' " +
+                                    "'External Provider Analytics|global|settings_use_external_provider_api|0' " +
+                                    "'Network Recommendation Scoring|global|network_recommendations_enabled|0' " +
+                                    "'Ad ID Tracking & Profiling|global|limit_ad_tracking|1' " +
+                                    "'Diagnostic Log Auto-Upload|system|upload_debug_log|0' " +
+                                    "'Package Usage Telemetry|secure|package_verifier_include_device_data|0' " +
+                                    "'User Feedback Logging|system|user_full_report|0'; do " +
+                                    "  IFS='|' read -r name ns key disable_target <<< \"$item\"; " +
+                                    "  val=$(adb shell settings get $ns $key 2>/dev/null | tr -d '\r'); " +
+                                    "  if [ -n \"$val\" ] && [ \"$val\" != \"null\" ] && [ \"$val\" != \"$disable_target\" ]; then " +
+                                    "    echo \"$name|$ns|$key|$val|$disable_target\"; " +
+                                    "  fi; " +
+                                    "done"
+                                ]
+
+                                stdout: StdioCollector {
+                                    onStreamFinished: {
+                                        secureTelemetryModel.clear();
+                                        secureTabHelper.isChecking = false;
+                                        let lines = text.trim().split("\n");
+                                        let foundCount = 0;
+
+                                        for (let i = 0; i < lines.length; i++) {
+                                            let line = lines[i].trim();
+                                            if (line.length > 0) {
+                                                let parts = line.split("|");
+                                                if (parts.length === 5) {
+                                                    foundCount++;
+                                                    console.log("[TELEMETRY SCAN RESULT]: Active telemetry -> " + parts[0] + " [" + parts[1] + "/" + parts[2] + " = " + parts[3] + "]");
+                                                    secureTelemetryModel.append({
+                                                        title: parts[0],
+                                                        namespace: parts[1],
+                                                        key: parts[2],
+                                                        targetVal: parts[4],
+                                                        isEnabled: true
+                                                    });
+                                                }
+                                            }
+                                        }
+
+                                        if (foundCount > 0) {
+                                            console.log("[TELEMETRY SCAN COMPLETE]: Found " + foundCount + " active telemetry items.");
+                                        } else {
+                                            console.log("[TELEMETRY SCAN COMPLETE]: Device is secure. No active safe-to-disable telemetry found.");
+                                        }
+                                    }
+                                }
+
+                                stderr: StdioCollector {
+                                    onStreamFinished: {
+                                        secureTabHelper.isChecking = false;
+                                        if (text.trim().length > 0) {
+                                            console.log("[TELEMETRY ERROR]: " + text.trim());
+                                        }
+                                    }
+                                }
+                            }
+
+                            Process {
+                                id: disableTelemetryProc
+                                property string disableKey: ""
+                                stdout: StdioCollector {
+                                    onStreamFinished: {
+                                        console.log("[TELEMETRY DISABLE SUCCESS]: Updated key " + disableTelemetryProc.disableKey);
+                                        for (let i = 0; i < secureTelemetryModel.count; i++) {
+                                            if (secureTelemetryModel.get(i).key === disableTelemetryProc.disableKey) {
+                                                secureTelemetryModel.remove(i);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                stderr: StdioCollector {
+                                    onStreamFinished: {
+                                        if (text.trim().length > 0) {
+                                            console.log("[TELEMETRY DISABLE ERROR]: " + text.trim());
+                                        }
+                                    }
+                                }
+                            }
+
+                            Process {
+                                id: fetchBatteryOptProc
+                                command: [
+                                    "bash", "-c",
+                                    "for pkg in $(comm -23 <(adb shell pm list packages -3 | sed 's/package://' | sort) <(adb shell dumpsys deviceidle whitelist | grep -oE '[a-zA-Z0-9_.]+' | sort -u)); do " +
+                                    "  bucket=$(adb shell am get-standby-bucket $pkg | tr -d '\r'); " +
+                                    "  op1=$(adb shell appops get $pkg RUN_IN_BACKGROUND 2>/dev/null | grep -iE 'ignore|deny|restricted' || true); " +
+                                    "  op2=$(adb shell appops get $pkg RUN_ANY_IN_BACKGROUND 2>/dev/null | grep -iE 'ignore|deny|restricted' || true); " +
+                                    "  if [ \"$bucket\" != \"restricted\" ] && [ -z \"$op1\" ] && [ -z \"$op2\" ]; then " +
+                                    "    echo $pkg; " +
+                                    "  fi; " +
+                                    "done"
+                                ]
+
+                                stdout: StdioCollector {
+                                    onStreamFinished: {
+                                        batteryOptimizationModel.clear();
+                                        secureTabHelper.isBatteryChecking = false;
+                                        let lines = text.trim().split("\n");
+
+                                        for (let i = 0; i < lines.length; i++) {
+                                            let rawPkg = lines[i].trim();
+                                            if (rawPkg.length > 0 && !isSystemCritical(rawPkg)) {
+                                                batteryOptimizationModel.append({
+                                                    displayName: formatDisplayName(rawPkg),
+                                                                                rawPkg: rawPkg,
+                                                                                isToggledOn: true
+                                                });
+                                            }
+                                        }
+                                        console.log("[BATTERY OPT COMPLETE]: Discovered " + batteryOptimizationModel.count + " un-restricted background packages.");
+                                    }
+                                }
+                                stderr: StdioCollector {
+                                    onStreamFinished: {
+                                        secureTabHelper.isBatteryChecking = false;
+                                        if (text.trim().length > 0) {
+                                            console.log("[BATTERY OPT ERROR]: " + text.trim());
+                                        }
+                                    }
+                                }
+                            }
+
+                            Process {
+                                id: restrictBatteryProc
+                                property var cmdQueue: []
+
+                                function runNext() {
+                                    if (cmdQueue.length > 0) {
+                                        let nextCmd = cmdQueue.shift();
+                                        console.log("[BATTERY PROC EXEC]: " + nextCmd.join(" "));
+                                        command = nextCmd;
+                                        running = true;
+                                    }
+                                }
+
+                                onExited: (code, status) => {
+                                    if (code === 0) {
+                                        console.log("[BATTERY PROC SUCCESS]: Step executed successfully.");
+                                    } else {
+                                        console.log("[BATTERY PROC ERROR]: Exit code " + code);
+                                    }
+                                    runNext();
+                                }
+                            }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                spacing: 10
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+
+                                    Text {
+                                        text: "Active Telemetry Settings"
+                                        color: "#dde5a2"
+                                        font.bold: true
+                                        font.family: "Monospace"
+                                        font.pixelSize: 13
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Button {
+                                        width: 90
+                                        height: 28
+                                        text: "Rescan"
+                                        font.pixelSize: 11
+                                        font.family: "Monospace"
+                                        scale: pressed ? 0.96 : 1.0
+                                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                                        background: Rectangle {
+                                            radius: 6
+                                            color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                                            border.color: Qt.darker("#555839", 1.2)
+                                            border.width: 1
+                                        }
+
+                                        contentItem: Text {
+                                            text: parent.text
+                                            font: parent.font
+                                            color: "#dde5a2"
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+
+                                        onClicked: secureTabHelper.checkTelemetry()
+                                    }
+                                }
+
+                                Item {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 85
+
+                                    ScrollView {
+                                        anchors.fill: parent
+                                        visible: secureTelemetryModel.count > 0
+                                        clip: true
+
+                                        ListView {
+                                            anchors.fill: parent
+                                            model: secureTelemetryModel
+                                            spacing: 6
+
+                                            delegate: Rectangle {
+                                                width: ListView.view.width
+                                                height: 44
+                                                color: Qt.rgba(0.22, 0.24, 0.21, 0.5)
+                                                radius: 6
+                                                border.color: "#3a3c2c"
+                                                border.width: 1
+
+                                                Item {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 8
+
+                                                    ColumnLayout {
+                                                        anchors.left: parent.left
+                                                        anchors.right: telemetrySwitch.left
+                                                        anchors.rightMargin: 8
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        spacing: 2
+
+                                                        Text {
+                                                            text: model.title
+                                                            color: "#b0ac63"
+                                                            font.pixelSize: 12
+                                                            font.family: "Monospace"
+                                                            font.bold: true
+                                                            elide: Text.ElideMiddle
+                                                            Layout.fillWidth: true
+                                                        }
+
+                                                        Text {
+                                                            text: model.namespace + " / " + model.key
+                                                            color: "#dde5a2"
+                                                            font.pixelSize: 10
+                                                            font.family: "Monospace"
+                                                            opacity: 0.8
+                                                            elide: Text.ElideMiddle
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+
+                                                    Switch {
+                                                        id: telemetrySwitch
+                                                        anchors.right: parent.right
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        checked: model.isEnabled
+
+                                                        indicator: Rectangle {
+                                                            implicitWidth: 44
+                                                            implicitHeight: 22
+                                                            radius: 11
+                                                            color: telemetrySwitch.checked ? "#2a2c22" : "#1b1c1e"
+                                                            border.color: telemetrySwitch.checked ? "#b0ac63" : "#444"
+                                                            border.width: 1
+
+                                                            Rectangle {
+                                                                x: telemetrySwitch.checked ? parent.width - width - 2 : 2
+                                                                y: 2
+                                                                width: 18
+                                                                height: 18
+                                                                radius: 9
+                                                                color: telemetrySwitch.checked ? "#dde5a2" : "#666666"
+
+                                                                Behavior on x {
+                                                                    NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        onToggled: {
+                                                            if (!telemetrySwitch.checked) {
+                                                                disableTelemetryProc.disableKey = model.key;
+                                                                let target = model.targetVal || "0";
+                                                                console.log("[TELEMETRY DISABLE TRIGGERED]: Disabling " + model.key + " -> setting target " + target);
+                                                                disableTelemetryProc.command = ["adb", "shell", "settings", "put", model.namespace, model.key, target];
+                                                                disableTelemetryProc.running = true;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        anchors.centerIn: parent
+                                        visible: secureTelemetryModel.count === 0 && !secureTabHelper.isChecking
+                                        spacing: 8
+
+                                        Text {
+                                            text: "🛡"
+                                            font.pixelSize: 32
+                                            Layout.alignment: Qt.AlignHCenter
+                                        }
+
+                                        Text {
+                                            text: "Phone is secure! No active safe-to-disable telemetry items detected."
+                                            color: "#dde5a2"
+                                            font.pixelSize: 13
+                                            font.family: "Monospace"
+                                            font.bold: true
+                                            horizontalAlignment: Text.AlignHCenter
+                                        }
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: secureTabHelper.isChecking
+                                        text: "Auditing phone telemetry settings..."
+                                        color: "#b0ac63"
+                                        font.pixelSize: 13
+                                        font.family: "Monospace"
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 100
+                                    spacing: 6
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+
+                                        Text {
+                                            text: "Battery Optimization    <font color='#cd4f4c'>-Put apps in deep sleep mode</font>"
+                                            color: "#dde5a2"
+                                            font.bold: true
+                                            font.family: "Monospace"
+                                            font.pixelSize: 13
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Button {
+                                            width: 90
+                                            height: 28
+                                            text: "Refresh"
+                                            font.pixelSize: 11
+                                            font.family: "Monospace"
+                                            scale: pressed ? 0.96 : 1.0
+                                            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                                            background: Rectangle {
+                                                radius: 6
+                                                color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                                                border.color: Qt.darker("#555839", 1.2)
+                                                border.width: 1
+                                            }
+
+                                            contentItem: Text {
+                                                text: parent.text
+                                                font: parent.font
+                                                color: "#dde5a2"
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+
+                                            onClicked: secureTabHelper.fetchBatteryOptimization()
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        color: "#1a1c18"
+                                        radius: 8
+                                        border.color: "#555839"
+                                        border.width: 1
+
+                                        ScrollView {
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            visible: batteryOptimizationModel.count > 0
+                                            clip: true
+
+                                            ListView {
+                                                anchors.fill: parent
+                                                model: batteryOptimizationModel
+                                                spacing: 6
+
+                                                delegate: Rectangle {
+                                                    width: ListView.view.width
+                                                    height: 48
+                                                    color: Qt.rgba(0.22, 0.24, 0.21, 0.5)
+                                                    radius: 6
+                                                    border.color: "#3a3c2c"
+                                                    border.width: 1
+
+                                                    Item {
+                                                        anchors.fill: parent
+                                                        anchors.margins: 8
+
+                                                        ColumnLayout {
+                                                            anchors.left: parent.left
+                                                            anchors.right: batterySwitch.left
+                                                            anchors.rightMargin: 8
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            spacing: 2
+
+                                                            Text {
+                                                                text: model.displayName
+                                                                color: "#b0ac63"
+                                                                font.pixelSize: 12
+                                                                font.family: "Monospace"
+                                                                font.bold: true
+                                                                elide: Text.ElideMiddle
+                                                                Layout.fillWidth: true
+                                                            }
+
+                                                            Text {
+                                                                text: model.rawPkg
+                                                                color: "#dde5a2"
+                                                                font.pixelSize: 11
+                                                                font.family: "Monospace"
+                                                                opacity: 0.8
+                                                                elide: Text.ElideMiddle
+                                                                Layout.fillWidth: true
+                                                            }
+                                                        }
+
+                                                        Switch {
+                                                            id: batterySwitch
+                                                            anchors.right: parent.right
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            checked: model.isToggledOn
+
+                                                            indicator: Rectangle {
+                                                                implicitWidth: 44
+                                                                implicitHeight: 22
+                                                                radius: 11
+                                                                color: batterySwitch.checked ? "#2a2c22" : "#1b1c1e"
+                                                                border.color: batterySwitch.checked ? "#b0ac63" : "#444"
+                                                                border.width: 1
+
+                                                                Rectangle {
+                                                                    x: batterySwitch.checked ? parent.width - width - 2 : 2
+                                                                    y: 2
+                                                                    width: 18
+                                                                    height: 18
+                                                                    radius: 9
+                                                                    color: batterySwitch.checked ? "#dde5a2" : "#666666"
+
+                                                                    Behavior on x {
+                                                                        NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            onToggled: {
+                                                                model.isToggledOn = batterySwitch.checked;
+                                                                let pkg = model.rawPkg;
+
+                                                                if (!batterySwitch.checked) {
+                                                                    restrictBatteryProc.cmdQueue = [
+                                                                        ["adb", "shell", "am", "set-standby-bucket", pkg, "restricted"],
+                                                                        ["adb", "shell", "appops", "set", pkg, "RUN_IN_BACKGROUND", "ignore"],
+                                                                        ["adb", "shell", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "ignore"]
+                                                                    ];
+                                                                } else {
+                                                                    restrictBatteryProc.cmdQueue = [
+                                                                        ["adb", "shell", "am", "set-standby-bucket", pkg, "working_set"],
+                                                                        ["adb", "shell", "appops", "set", pkg, "RUN_IN_BACKGROUND", "allow"],
+                                                                        ["adb", "shell", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "allow"]
+                                                                    ];
+                                                                }
+                                                                restrictBatteryProc.runNext();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: batteryOptimizationModel.count === 0 && !secureTabHelper.isBatteryChecking
+                                            text: "No safe third-party apps available to restrict."
+                                            color: "#b0ac63"
+                                            font.pixelSize: 12
+                                            font.family: "Monospace"
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: secureTabHelper.isBatteryChecking
+                                            text: "Fetching battery optimization statistics..."
+                                            color: "#b0ac63"
+                                            font.pixelSize: 12
+                                            font.family: "Monospace"
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    spacing: 6
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+
+                                        Text {
+                                            text: "Speedup phone"
+                                            color: "#dde5a2"
+                                            font.bold: true
+                                            font.family: "Monospace"
+                                            font.pixelSize: 13
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Button {
+                                            width: 90
+                                            height: 28
+                                            text: "Refresh"
+                                            font.pixelSize: 11
+                                            font.family: "Monospace"
+                                            scale: pressed ? 0.96 : 1.0
+                                            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                                            background: Rectangle {
+                                                radius: 6
+                                                color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
+                                                border.color: Qt.darker("#555839", 1.2)
+                                                border.width: 1
+                                            }
+
+                                            contentItem: Text {
+                                                text: parent.text
+                                                font: parent.font
+                                                color: "#dde5a2"
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+
+                                            onClicked: secureTabHelper.checkSpeedup()
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        color: "#1a1c18"
+                                        radius: 8
+                                        border.color: "#555839"
+                                        border.width: 1
+
+                                        ScrollView {
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            visible: speedupModel.count > 0
+                                            clip: true
+
+                                            ListView {
+                                                anchors.fill: parent
+                                                model: speedupModel
+                                                spacing: 6
+
+                                                delegate: Rectangle {
+                                                    width: ListView.view.width
+                                                    height: 48
+                                                    color: Qt.rgba(0.22, 0.24, 0.21, 0.5)
+                                                    radius: 6
+                                                    border.color: "#3a3c2c"
+                                                    border.width: 1
+
+                                                    Item {
+                                                        anchors.fill: parent
+                                                        anchors.margins: 8
+
+                                                        ColumnLayout {
+                                                            anchors.left: parent.left
+                                                            anchors.right: speedupSwitch.left
+                                                            anchors.rightMargin: 8
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            spacing: 2
+
+                                                            Text {
+                                                                text: model.displayName
+                                                                color: "#b0ac63"
+                                                                font.pixelSize: 12
+                                                                font.family: "Monospace"
+                                                                font.bold: true
+                                                                elide: Text.ElideMiddle
+                                                                Layout.fillWidth: true
+                                                            }
+
+                                                            Text {
+                                                                text: model.statusText + " (" + model.rawPkg + ")"
+                                                                color: model.statusText.indexOf("hogging") !== -1 ? "#ff7777" : "#dde5a2"
+                                                                font.pixelSize: 11
+                                                                font.family: "Monospace"
+                                                                opacity: 0.8
+                                                                elide: Text.ElideMiddle
+                                                                Layout.fillWidth: true
+                                                            }
+                                                        }
+
+                                                        Switch {
+                                                            id: speedupSwitch
+                                                            anchors.right: parent.right
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            checked: model.isToggledOn
+
+                                                            indicator: Rectangle {
+                                                                implicitWidth: 44
+                                                                implicitHeight: 22
+                                                                radius: 11
+                                                                color: speedupSwitch.checked ? "#2a2c22" : "#1b1c1e"
+                                                                border.color: speedupSwitch.checked ? "#b0ac63" : "#444"
+                                                                border.width: 1
+
+                                                                Rectangle {
+                                                                    x: speedupSwitch.checked ? parent.width - width - 2 : 2
+                                                                    y: 2
+                                                                    width: 18
+                                                                    height: 18
+                                                                    radius: 9
+                                                                    color: speedupSwitch.checked ? "#dde5a2" : "#666666"
+
+                                                                    Behavior on x {
+                                                                        NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            onToggled: {
+                                                                model.isToggledOn = speedupSwitch.checked;
+                                                                let pkg = model.rawPkg;
+
+                                                                if (!speedupSwitch.checked) {
+                                                                    if (model.type === "AV") {
+                                                                        speedupActionProc.command = ["adb", "shell", "pm", "disable-user", "--user", "0", pkg];
+                                                                    } else if (model.type === "PLAY") {
+                                                                        speedupActionProc.command = ["bash", "-c", "adb shell am set-standby-bucket " + pkg + " restricted && adb shell appops set " + pkg + " RUN_IN_BACKGROUND ignore"];
+                                                                    }
+                                                                    speedupActionProc.running = true;
+                                                                } else {
+                                                                    if (model.type === "AV") {
+                                                                        speedupActionProc.command = ["adb", "shell", "pm", "enable", "--user", "0", pkg];
+                                                                    } else if (model.type === "PLAY") {
+                                                                        speedupActionProc.command = ["bash", "-c", "adb shell am set-standby-bucket " + pkg + " working_set && adb shell appops set " + pkg + " RUN_IN_BACKGROUND allow"];
+                                                                    }
+                                                                    speedupActionProc.running = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: speedupModel.count === 0 && !secureTabHelper.isSpeedupChecking
+                                            text: "No resource hogs detected. Caches trimmed."
+                                            color: "#b0ac63"
+                                            font.pixelSize: 12
+                                            font.family: "Monospace"
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: secureTabHelper.isSpeedupChecking
+                                            text: "Scanning resource usage & trimming caches..."
+                                            color: "#b0ac63"
+                                            font.pixelSize: 12
+                                            font.family: "Monospace"
+                                        }
                                     }
                                 }
                             }
@@ -1396,7 +2248,7 @@ ShellRoot {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 56
+                    height: 72
                     color: Qt.rgba(0.18, 0.20, 0.17, 0.8)
                     radius: 8
                     border.color: "#555839"
@@ -1490,6 +2342,36 @@ ShellRoot {
                                 color: "#dde5a2"
                                 font.pixelSize: 12
                                 font.family: "Monospace"
+                            }
+                        }
+
+                        // Battery & System Update Line
+                        Row {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            spacing: 12
+
+                            Text {
+                                text: "Battery: " + phoneBatteryLevel
+                                color: "#dde5a2"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+
+                            Text {
+                                visible: isUpdateAvailable
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+
+                            Text {
+                                visible: isUpdateAvailable
+                                text: "Update available"
+                                color: "#ff5555"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                                font.bold: true
                             }
                         }
                     }
@@ -1610,11 +2492,39 @@ ShellRoot {
             command: ["which", "clamscan"]
             stdout: StdioCollector {
                 onStreamFinished: {
-                    if (text.trim().length > 0) {
-                        depsInstalled = true;
+                    depsInstalled = text.trim().length > 0;
+                }
+            }
+        }
+
+        Process {
+            id: fetchBatteryProc
+            command: ["adb", "shell", "cmd", "battery", "get", "level"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let level = text.trim();
+                    if (level.length > 0 && !isNaN(level)) {
+                        phoneBatteryLevel = level + "%";
                     } else {
-                        depsInstalled = false;
+                        phoneBatteryLevel = "-";
                     }
+                }
+            }
+        }
+
+        Process {
+            id: checkUpdateProc
+            command: [
+                "bash", "-c",
+                "adb shell 'dumpsys update_engine 2>/dev/null | grep -i status || dumpsys ota 2>/dev/null | grep -i status || getprop sys.ota.status 2>/dev/null'"
+            ]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let output = text.trim().toLowerCase();
+                    isUpdateAvailable = output.includes("update_available") ||
+                    output.includes("downloading") ||
+                    output.includes("pending") ||
+                    output.includes("ready_to_reboot");
                 }
             }
         }
@@ -1679,328 +2589,22 @@ ShellRoot {
             stdout: StdioCollector {
                 onStreamFinished: {
                     searchResultsModel.clear();
-                    searchAttempted = true;
                     let lines = text.trim().split("\n");
-                    let term = searchPhoneProc.queryTerm.toLowerCase();
-
                     for (let i = 0; i < lines.length; i++) {
                         let pkg = lines[i].trim();
-                        if (pkg.length > 0) {
-                            let cleanName = formatDisplayName(pkg);
-                            if (pkg.toLowerCase().includes(term) || cleanName.toLowerCase().includes(term)) {
+                        if (pkg.length > 0 && searchPhoneProc.queryTerm.length > 0) {
+                            let disp = formatDisplayName(pkg);
+                            if (pkg.toLowerCase().includes(searchPhoneProc.queryTerm) || disp.toLowerCase().includes(searchPhoneProc.queryTerm)) {
                                 searchResultsModel.append({
-                                    "displayName": cleanName,
-                                    "rawPkg": pkg,
-                                    "isInstalled": true,
-                                    "originalState": true
+                                    displayName: disp,
+                                    rawPkg: pkg,
+                                    isInstalled: true,
+                                    originalState: true
                                 });
                             }
                         }
                     }
-                    sortModel(searchResultsModel);
                 }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {}
-            }
-        }
-
-        Process {
-            id: installFDroidProc
-            command: ["bash", "-c", "curl -L -o /tmp/fdroid.apk https://f-droid.org/F-Droid.apk && adb push /tmp/fdroid.apk /data/local/tmp/fdroid.apk && adb shell pm install -r /data/local/tmp/fdroid.apk && adb shell monkey -p org.fdroid.fdroid -c android.intent.category.LAUNCHER 1"]
-            stdout: StdioCollector {
-                onStreamFinished: runDiagnostics()
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {}
-            }
-        }
-
-        Process {
-            id: openFDroidProc
-            command: ["adb", "shell", "monkey", "-p", "org.fdroid.fdroid", "-c", "android.intent.category.LAUNCHER", "1"]
-            stdout: StdioCollector { onStreamFinished: {} }
-            stderr: StdioCollector { onStreamFinished: {} }
-        }
-
-        Process {
-            id: playStoreConnectCheckProc
-            command: ["adb", "get-state"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (text.trim() === "device") {
-                        if (pendingPlayStorePkg !== "") {
-                            playStoreOpenProc.command = ["adb", "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "market://details?id=" + pendingPlayStorePkg];
-                            playStoreOpenProc.running = true;
-                            pendingPlayStorePkg = "";
-                        }
-                    } else {
-                        playStoreRetryTimer.restart();
-                    }
-                }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {
-                    playStoreRetryTimer.restart();
-                }
-            }
-        }
-
-        Timer {
-            id: playStoreRetryTimer
-            interval: 2000
-            repeat: false
-            onTriggered: {
-                if (pendingPlayStorePkg !== "") {
-                    playStoreConnectCheckProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: playStoreOpenProc
-            command: []
-            stdout: StdioCollector { onStreamFinished: {} }
-            stderr: StdioCollector { onStreamFinished: {} }
-        }
-
-        Process {
-            id: rebootRecoveryProc
-            command: ["adb", "reboot", "recovery"]
-            stdout: StdioCollector { onStreamFinished: {} }
-            stderr: StdioCollector { onStreamFinished: {} }
-        }
-
-        Process {
-            id: rebootBootloaderProc
-            command: ["adb", "reboot", "download"]
-            stdout: StdioCollector { onStreamFinished: {} }
-            stderr: StdioCollector { onStreamFinished: {} }
-        }
-
-        Timer {
-            id: scrcpyReconnectTimer
-            interval: 3000
-            repeat: false
-            running: false
-            onTriggered: {
-                if (isPhoneVisible && !startScrcpyProc.running && !killScrcpyProc.running) {
-                    startScrcpyProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: startScrcpyProc
-            command: [
-                "scrcpy",
-                "--window-title=OSD_SCRCPY_EMBED",
-                "--no-audio",
-                "--max-size=800",
-                "--max-fps=60",
-                "--window-width=340",
-                "--window-height=680",
-                "--window-x=600",
-                "--window-y=200",
-                "--window-borderless",
-                "--stay-awake"
-            ]
-
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (text.trim().length > 0) {
-                        console.log("[SCRCPY STDOUT]: " + text.trim());
-                    }
-                }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {
-                    if (text.trim().length > 0) {
-                        console.log("[SCRCPY STDERR]: " + text.trim());
-                    }
-                }
-            }
-            onExited: (code, status) => {
-                if (isPhoneVisible && code !== 0) {
-                    scrcpyReconnectTimer.start();
-                } else if (code === 0) {
-                    isPhoneVisible = false;
-                }
-            }
-        }
-
-        Process {
-            id: killScrcpyProc
-            command: ["pkill", "-f", "OSD_SCRCPY_EMBED"]
-            onExited: (code, status) => {
-                // Handled cleanly by button trigger
-            }
-        }
-
-        Process {
-            id: checkAdbProc
-            command: ["which", "adb"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (text.trim().length > 0) {
-                        startupRestartAdbProc.running = true;
-                    } else {
-                        showMissingAdbGuide();
-                    }
-                }
-            }
-        }
-
-        Process {
-            id: startupRestartAdbProc
-            command: ["sh", "-c", "adb kill-server && adb start-server"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    checkDevicesProc.running = true;
-                }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {
-                    checkDevicesProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: checkDevicesProc
-            command: ["adb", "devices"]
-            stdout: StdioCollector {
-                onStreamFinished: parseAdbDevices(text)
-            }
-        }
-
-        Process {
-            id: fetchPhoneInfoManufacturer
-            command: ["adb", "shell", "getprop", "ro.product.manufacturer"]
-            stdout: StdioCollector {
-                onStreamFinished: { phoneManufacturer = text.trim(); fetchPhoneInfoModel.running = true; }
-            }
-        }
-
-        Process {
-            id: fetchPhoneInfoModel
-            command: ["adb", "shell", "getprop", "ro.product.model"]
-            stdout: StdioCollector {
-                onStreamFinished: { phoneModel = text.trim(); fetchPhoneInfoAndroid.running = true; }
-            }
-        }
-
-        Process {
-            id: fetchPhoneInfoAndroid
-            command: ["adb", "shell", "getprop", "ro.build.version.release"]
-            stdout: StdioCollector {
-                onStreamFinished: { phoneAndroid = text.trim(); fetchPhoneInfoSerial.running = true; }
-            }
-        }
-
-        Process {
-            id: fetchPhoneInfoSerial
-            command: ["adb", "get-serialno"]
-            stdout: StdioCollector {
-                onStreamFinished: { phoneSerial = text.trim(); fetchPhoneInfoStorage.running = true; }
-            }
-        }
-
-        Process {
-            id: fetchPhoneInfoStorage
-            command: ["adb", "shell", "df", "-h", "/sdcard"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    let lines = text.trim().split("\n");
-                    if (lines.length > 1) {
-                        let parts = lines[lines.length - 1].trim().split(/\s+/);
-                        if (parts.length >= 4) {
-                            storageTotal = parts[1];
-                            storageUsed = parts[2];
-                            storageAvail = parts[3];
-                        }
-                    }
-                    fetchLaunchersProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: fetchLaunchersProc
-            command: ["adb", "shell", "cmd", "package", "query-activities", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    parseLaunchableApps(text);
-                    fetchInstalledPackagesProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: fetchInstalledPackagesProc
-            command: ["adb", "shell", "pm", "list", "packages"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    fetchUninstalledPackagesProc.installedRaw = text;
-                    fetchUninstalledPackagesProc.running = true;
-                }
-            }
-        }
-
-        Process {
-            id: fetchUninstalledPackagesProc
-            property string installedRaw: ""
-            command: ["adb", "shell", "pm", "list", "packages", "-u"]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    finalizeAppLists(fetchUninstalledPackagesProc.installedRaw, text, {});
-                }
-            }
-        }
-
-        Process {
-            id: fetchRawCommandOutputProc
-            command: [
-                "bash", "-c",
-                "comm -13 <(adb shell pm list packages | sed 's/package://' | sort) <(adb shell pm list packages -u | sed 's/package://' | sort) | grep -vE '^(com\\.(google|samsung|sec|android|facebook|huawei)|vendor)'"
-            ]
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    let textOut = text.trim();
-                    let lines = textOut.split("\n");
-                    for (let i = 0; i < lines.length; i++) {
-                        let pkg = lines[i].replace("package:", "").trim();
-                        if (pkg.length > 0 && !isSystemCritical(pkg)) {
-                            let exists = false;
-                            for (let j = 0; j < thirdPartyAppsModel.count; j++) {
-                                if (thirdPartyAppsModel.get(j).rawPkg === pkg) {
-                                    exists = true;
-                                    break;
-                                }
-                            }
-                            if (!exists) {
-                                thirdPartyAppsModel.append({
-                                    "displayName": formatDisplayName(pkg),
-                                                           "rawPkg": pkg,
-                                                           "isInstalled": false,
-                                                           "originalState": false
-                                });
-                            }
-                        }
-                    }
-                    sortModel(thirdPartyAppsModel);
-                }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {}
-            }
-        }
-
-        Process {
-            id: restartAdbProc
-            command: ["sh", "-c", "adb kill-server && adb start-server"]
-            stdout: StdioCollector {
-                onStreamFinished: checkDevicesProc.running = true
             }
         }
 
@@ -2008,277 +2612,85 @@ ShellRoot {
             id: actionProc
             property string currentPkg: ""
             property bool isFallbackMode: false
+            command: []
 
+            onExited: (code, status) => {
+                if (code === 0) {
+                    statusText.text += " Successfully processed " + currentPkg + "\n";
+                    processNextAction();
+                } else {
+                    if (!isFallbackMode) {
+                        isFallbackMode = true;
+                        statusText.text += " Package manager command failed. Attempting ADB fallback for " + currentPkg + "...\n";
+                        command = ["adb", "shell", "pm", "disable-user", "--user", "0", currentPkg];
+                        running = true;
+                    } else {
+                        statusText.text += " Failed to process " + currentPkg + "\n";
+                        processNextAction();
+                    }
+                }
+            }
+        }
+
+        Process {
+            id: rebootRecoveryProc
+            command: ["adb", "reboot", "recovery"]
+        }
+
+        Process {
+            id: rebootBootloaderProc
+            command: ["adb", "reboot", "bootloader"]
+        }
+
+        Process {
+            id: killScrcpyProc
+            command: ["pkill", "scrcpy"]
+        }
+
+        Process {
+            id: startScrcpyProc
+            command: ["scrcpy"]
+        }
+
+        Process {
+            id: installFDroidProc
+            command: ["bash", "-c", "curl -s -L 'https://f-droid.org/F-Droid.apk' -o /tmp/FDroid.apk && adb install /tmp/FDroid.apk && rm /tmp/FDroid.apk"]
+            onExited: code => {
+                if (code === 0) {
+                    isFDroidInstalled = true;
+                }
+            }
+        }
+
+        Process {
+            id: openFDroidProc
+            command: ["adb", "shell", "monkey", "-p", "org.fdroid.fdroid", "-c", "android.intent.category.LAUNCHER", "1"]
+        }
+
+        Process {
+            id: playStoreConnectCheckProc
+            command: ["adb", "shell", "pm", "list", "packages", "com.android.vending"]
             stdout: StdioCollector {
                 onStreamFinished: {
-                    let out = text.trim();
-                    if (out.length > 0) {
-                        statusText.text += "  -> Output: " + out + "\n";
+                    if (text.trim().length > 0 && pendingPlayStorePkg !== "") {
+                        let launchProc = Qt.createQmlObject('import Quickshell.Io 1.0; Process {}', window);
+                        launchProc.command = ["adb", "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "market://details?id=" + pendingPlayStorePkg];
+                        launchProc.running = true;
                     }
-
-                    if (!actionProc.isFallbackMode && out.includes("NameNotFoundException")) {
-                        statusText.text += "⚠️ Package completely wiped. Opening Play Store page on phone...\n";
-                        actionProc.isFallbackMode = true;
-                        actionProc.command = ["adb", "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "market://details?id=" + actionProc.currentPkg];
-                        actionProc.running = true;
-                        return;
-                    }
-
-                    actionProc.isFallbackMode = false;
-                    processNextAction();
-                }
-            }
-            stderr: StdioCollector {
-                onStreamFinished: {
-                    let err = text.trim();
-                    if (err.length > 0) {
-                        statusText.text += "  [ERROR]: " + err + "\n";
-                    }
+                    pendingPlayStorePkg = "";
                 }
             }
         }
 
         Timer {
-            id: statusScrollView
-            property bool visible: true
-        }
-
-        Timer {
-            interval: 80
-            running: true
+            id: scrcpyReconnectTimer
+            interval: 2000
             repeat: false
             onTriggered: {
-                checkDepsProc.running = true;
-                runDiagnostics();
-            }
-        }
-    }
-
-    function triggerPhoneSearch() {
-        let term = searchField.text.trim();
-        if (term.length > 0) {
-            searchPhoneProc.queryTerm = term;
-            searchPhoneProc.running = true;
-        } else {
-            searchAttempted = false;
-            searchResultsModel.clear();
-        }
-    }
-
-    function runDiagnostics() {
-        statusScrollView.visible = true;
-        statusText.text = "Checking Linux dependencies & restarting ADB daemon...\n";
-        checkAdbProc.running = true;
-    }
-
-    function showMissingAdbGuide() {
-        statusText.text =
-        "⚠️ ADB IS NOT INSTALLED\n\n" +
-        "Please install android-tools & scrcpy via your package manager.\n\n" +
-        "Steps:\n1. Run package manager install.\n2. Connect phone.\n3. Re-check Devices.";
-    }
-
-    function parseAdbDevices(output) {
-        let lines = output.trim().split("\n");
-        let deviceFound = false;
-        let unauthorized = false;
-
-        for (let i = 1; i < lines.length; i++) {
-            let line = lines[i].trim();
-            if (line.length > 0) {
-                deviceFound = true;
-                if (line.includes("unauthorized")) unauthorized = true;
-            }
-        }
-
-        if (!deviceFound) {
-            statusText.text =
-            "⚠️ NO DEVICE FOUND\n\n" +
-            "1. Connect phone via USB.\n" +
-            "2. Turn on 'USB Debugging'.\n" +
-            "3. Click 'Re-check Devices'.";
-        } else if (unauthorized) {
-            statusText.text = "⚠️ DEVICE UNAUTHORIZED\n\nAccept USB debugging prompt on your phone screen...";
-            restartAdbProc.running = true;
-        } else {
-            statusText.text = "Device authorized! Querying phone info and app records...\n";
-            fetchPhoneInfoManufacturer.running = true;
-        }
-    }
-
-    function parseLaunchableApps(output) {
-        let lines = output.split("\n");
-        let apps = [];
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i].trim();
-            if (line.includes("packageName=")) {
-                let pkg = line.split("packageName=")[1].split(" ")[0].trim();
-                if (pkg.length > 0 && apps.indexOf(pkg) === -1) {
-                    apps.push(pkg);
+                if (isPhoneVisible) {
+                    startScrcpyProc.running = true;
                 }
             }
-        }
-        launchableApps = apps;
-    }
-
-    function finalizeAppLists(installedText, uninstalledText, trackedMap) {
-        googleAppsModel.clear();
-        thirdPartyAppsModel.clear();
-        appsToUninstall = [];
-        appsToEnable = [];
-
-        let parsePackages = function(rawText) {
-            let list = [];
-            let lines = rawText.split("\n");
-            for (let i = 0; i < lines.length; i++) {
-                let pkg = lines[i].replace("package:", "").trim();
-                if (pkg.length > 0 && list.indexOf(pkg) === -1) {
-                    list.push(pkg);
-                }
-            }
-            return list;
-        };
-
-        let activeList = parsePackages(installedText);
-        let allList = parsePackages(uninstalledText);
-
-        isFDroidInstalled = activeList.indexOf("org.fdroid.fdroid") !== -1;
-
-        let combinedMap = {};
-        for (let i = 0; i < allList.length; i++) {
-            let pkg = allList[i];
-            let isActive = activeList.indexOf(pkg) !== -1;
-            combinedMap[pkg] = isActive;
-        }
-
-        for (let pkg in trackedMap) {
-            if (trackedMap[pkg]) {
-                combinedMap[pkg] = false;
-            } else if (combinedMap[pkg] === undefined) {
-                combinedMap[pkg] = true;
-            }
-        }
-
-        let explicitCheckList = ["com.google.android.apps.photos", "com.google.ar.lens"];
-        for (let i = 0; i < explicitCheckList.length; i++) {
-            let pkg = explicitCheckList[i];
-            if (combinedMap[pkg] === undefined) {
-                combinedMap[pkg] = false;
-            }
-        }
-
-        let sortedPkgs = Object.keys(combinedMap).sort(function(a, b) {
-            let activeA = combinedMap[a];
-            let activeB = combinedMap[b];
-            let isGoogleA = a.toLowerCase().includes("google") || a === "com.android.chrome";
-            let isGoogleB = b.toLowerCase().includes("google") || b === "com.android.chrome";
-
-            if (!isGoogleA && !isGoogleB) {
-                if (activeA !== activeB) return activeA ? -1 : 1;
-            }
-
-            if (activeA === activeB) return a.localeCompare(b);
-            return activeA ? -1 : 1;
-        });
-
-        for (let i = 0; i < sortedPkgs.length; i++) {
-            let rawPkg = sortedPkgs[i];
-            let isActive = combinedMap[rawPkg];
-
-            if (isSystemCritical(rawPkg)) {
-                continue;
-            }
-
-            let isGoogle = rawPkg.toLowerCase().includes("google") || rawPkg === "com.android.chrome";
-            let isLaunchable = launchableApps.indexOf(rawPkg) !== -1 || explicitCheckList.indexOf(rawPkg) !== -1;
-
-            if (!isGoogle && !isLaunchable && trackedMap[rawPkg] === undefined) {
-                continue;
-            }
-
-            let cleanName = formatDisplayName(rawPkg);
-            let itemData = {
-                "displayName": cleanName,
-                "rawPkg": rawPkg,
-                "isInstalled": isActive,
-                "originalState": isActive
-            };
-
-            if (isGoogle) {
-                googleAppsModel.append(itemData);
-            } else {
-                thirdPartyAppsModel.append(itemData);
-            }
-        }
-        statusScrollView.visible = false;
-        recalculateChanges();
-
-        fetchRawCommandOutputProc.running = true;
-    }
-
-    function applyPendingChanges() {
-        statusScrollView.visible = true;
-        statusText.text = "Applying pending package changes...\n\n";
-        processNextAction();
-    }
-
-    function markItemLocally(pkg, isInstalledState) {
-        let updateModel = function(model) {
-            for (let i = 0; i < model.count; i++) {
-                let item = model.get(i);
-                if (item && item.rawPkg === pkg) {
-                    model.setProperty(i, "isInstalled", isInstalledState);
-                    model.setProperty(i, "originalState", isInstalledState);
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        let found = updateModel(googleAppsModel);
-        if (!found) {
-            found = updateModel(thirdPartyAppsModel);
-        }
-        if (!found) {
-            found = updateModel(searchResultsModel);
-        }
-
-        if (found) {
-            sortModel(googleAppsModel);
-            sortModel(thirdPartyAppsModel);
-            sortModel(searchResultsModel);
-        }
-    }
-
-    function processNextAction() {
-        let uninstalls = appsToUninstall;
-        let enables = appsToEnable;
-
-        if (uninstalls.length > 0) {
-            let pkg = uninstalls.shift();
-            appsToUninstall = uninstalls;
-            actionProc.currentPkg = pkg;
-            actionProc.isFallbackMode = false;
-            statusText.text += "Uninstalling " + pkg + "...\n";
-
-            markItemLocally(pkg, false);
-
-            actionProc.command = ["adb", "shell", "pm", "uninstall", "-k", "--user", "0", pkg];
-            actionProc.running = true;
-        } else if (enables.length > 0) {
-            let pkg = enables.shift();
-            appsToEnable = enables;
-            actionProc.currentPkg = pkg;
-            actionProc.isFallbackMode = false;
-            statusText.text += "Restoring " + pkg + "...\n";
-
-            markItemLocally(pkg, true);
-
-            actionProc.command = ["adb", "shell", "cmd", "package", "install-existing", pkg];
-            actionProc.running = true;
-        } else {
-            statusText.text += "\nCompleted! Refreshing state...";
-            runDiagnostics();
         }
     }
 }
