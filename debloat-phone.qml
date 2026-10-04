@@ -19,6 +19,8 @@ ShellRoot {
     property string phoneModel: "Unknown"
     property string phoneAndroid: "Unknown"
     property string phoneSerial: "Unknown"
+    property string phoneReleaseYear: "-"
+    property string phoneBuildDate: "-"
 
     // Battery & System Update Properties
     property string phoneBatteryLevel: "-"
@@ -37,6 +39,10 @@ ShellRoot {
     property string scanStatusMessage: ""
     property string detectedInfectedFile: ""
     property bool isScanning: false
+
+    // JSON Package Info Storage
+    property var packageDatabase: ({})
+    property var selectedAppInfo: null
 
     property var friendlyNames: ({
         "com.google.android.gm": "Gmail",
@@ -87,6 +93,47 @@ ShellRoot {
         "com.sec.android.app.myfiles",
         "com.miui.home"
     ]
+
+    // Read google_packages.json via Process
+    // The JSON file MUST be placed in the same directory as this QML file.
+    Process {
+        id: loadJsonProc
+        property string jsonPath: Qt.resolvedUrl("google_packages.json").toString().replace("file://", "")
+        command: ["cat", jsonPath]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let raw = text.trim();
+                console.log("[JSON] Attempting to load from:", loadJsonProc.jsonPath, "length:", raw.length);
+                try {
+                    let parsedData = JSON.parse(raw);
+                    let db = {};
+                    for (let i = 0; i < parsedData.length; i++) {
+                        let item = parsedData[i];
+                        if (item.package) {
+                            db[item.package] = item;
+                        }
+                    }
+                    packageDatabase = db;
+                    console.log("[JSON] Successfully loaded", Object.keys(db).length, "package entries.");
+                } catch (e) {
+                    console.log("[JSON] Error parsing google_packages.json:", e);
+                    console.log("[JSON] First 200 chars of content:", raw.substring(0, 200));
+                }
+            }
+        }
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.trim().length > 0) {
+                    console.log("[JSON] cat error:", text.trim());
+                }
+            }
+        }
+    }
+
+    Component.onCompleted: {
+        runDiagnostics();
+    }
 
     function isSystemCritical(pkg) {
         let name = pkg.toLowerCase();
@@ -235,6 +282,10 @@ ShellRoot {
         checkDepsProc.running = true;
         fetchBatteryProc.running = true;
         checkUpdateProc.running = true;
+        fetchDeviceInfoProc.running = true;
+        fetchStorageProc.running = true;
+        fetchThirdPartyAppsProc.running = true;
+        fetchGoogleAppsProc.running = true;
     }
 
     property var pendingActionsQueue: []
@@ -312,6 +363,7 @@ ShellRoot {
                     background: Rectangle { color: "transparent" }
 
                     onCurrentIndexChanged: {
+                        selectedAppInfo = null; // Reset selection on tab change
                         if (currentIndex === 2) {
                             searchField.forceActiveFocus();
                         } else if (currentIndex === 4) {
@@ -584,7 +636,7 @@ ShellRoot {
                                         id: searchField
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: 42
-                                        placeholderText: "Search for apps"
+                                        placeholderText: "Search… (try: services, google apps, third party)"
                                         placeholderTextColor: "#a8ad78"
                                         color: "#dde5a2"
                                         font.family: "Monospace"
@@ -699,7 +751,7 @@ ShellRoot {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: "⚠️️ Reboots your phone into Recovery Mode. Used for system updates, wiping caches, factory resets, or sideloading packages."
+                                        text: "⚠️ Reboots your phone into Recovery Mode. Used for system updates, wiping caches, factory resets, or sideloading packages."
                                         color: "#b0ac63"
                                         font.pixelSize: 12
                                         font.family: "Monospace"
@@ -1955,6 +2007,74 @@ ShellRoot {
                     }
                 }
 
+                // Selected App Information Box Output (Visible on Google, Third-Party, and Search tabs)
+                // Displays description and safe_to_remove status sourced from google_packages.json
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: selectedAppInfo !== null ? 110 : 0
+                    visible: selectedAppInfo !== null && (tabBar.currentIndex === 0 || tabBar.currentIndex === 1 || tabBar.currentIndex === 2)
+                    color: Qt.rgba(0.22, 0.24, 0.21, 0.95)
+                    radius: 8
+                    border.color: "#b0ac63"
+                    border.width: 1
+
+                    Behavior on implicitHeight {
+                        NumberAnimation { duration: 180; easing.type: Easing.InOutQuad }
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 6
+
+                        // Package name header
+                        Text {
+                            text: selectedAppInfo ? selectedAppInfo.pkg : ""
+                            color: "#dde5a2"
+                            font.pixelSize: 13
+                            font.bold: true
+                            font.family: "Monospace"
+                            Layout.fillWidth: true
+                            elide: Text.ElideMiddle
+                        }
+
+                        // Safe to remove status (from JSON)
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: "Safe to Remove:"
+                                color: "#b0ac63"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                                font.bold: true
+                            }
+
+                            Text {
+                                text: selectedAppInfo ? selectedAppInfo.safeToRemove : ""
+                                color: selectedAppInfo ? (selectedAppInfo.safeToRemove === "Yes" ? "#88ff88" : (selectedAppInfo.safeToRemove === "No" ? "#ff7777" : "#ffff77")) : "#dde5a2"
+                                font.pixelSize: 13
+                                font.bold: true
+                                font.family: "Monospace"
+                            }
+                        }
+
+                        // Description (from JSON)
+                        Text {
+                            text: selectedAppInfo ? selectedAppInfo.description : ""
+                            color: "#c8d0a0"
+                            font.pixelSize: 12
+                            font.family: "Monospace"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            maximumLineCount: 3
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
                 Column {
                     Layout.fillWidth: true
                     spacing: 8
@@ -2248,11 +2368,12 @@ ShellRoot {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 72
+                    height: 90
                     color: Qt.rgba(0.18, 0.20, 0.17, 0.8)
                     radius: 8
                     border.color: "#555839"
                     border.width: 1
+                    clip: true
 
                     Column {
                         anchors.centerIn: parent
@@ -2261,7 +2382,7 @@ ShellRoot {
                         // Storage Information Line
                         Row {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            spacing: 12
+                            spacing: 10
 
                             Text {
                                 text: "Storage Total: " + storageTotal
@@ -2345,20 +2466,20 @@ ShellRoot {
                             }
                         }
 
-                        // Battery & System Update Line
+                        // Battery, Update Status, Released Year & Build Date Line
                         Row {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            spacing: 12
+                            spacing: 8
 
                             Text {
                                 text: "Battery: " + phoneBatteryLevel
                                 color: "#dde5a2"
                                 font.pixelSize: 12
                                 font.family: "Monospace"
+                                font.bold: true
                             }
 
                             Text {
-                                visible: isUpdateAvailable
                                 text: "|"
                                 color: "#555839"
                                 font.pixelSize: 12
@@ -2366,12 +2487,25 @@ ShellRoot {
                             }
 
                             Text {
-                                visible: isUpdateAvailable
-                                text: "Update available"
-                                color: "#ff5555"
+                                text: isUpdateAvailable ? "Update available" : "Up to date"
+                                color: isUpdateAvailable ? "#ff5555" : "#dde5a2"
                                 font.pixelSize: 12
                                 font.family: "Monospace"
-                                font.bold: true
+                                font.bold: isUpdateAvailable
+                            }
+
+                            Text {
+                                text: "|"
+                                color: "#555839"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                            }
+
+                            Text {
+                                text: "Released: " + phoneReleaseYear
+                                color: "#b0ac63"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
                             }
                         }
                     }
@@ -2392,13 +2526,33 @@ ShellRoot {
                 height: 48
                 color: mouseArea.containsMouse ? Qt.rgba(0.28, 0.30, 0.25, 0.7) : Qt.rgba(0.22, 0.24, 0.21, 0.5)
                 radius: 6
-                border.color: mouseArea.containsMouse ? "#b0ac63" : "#3a3c2c"
-                border.width: 1
+                border.color: (selectedAppInfo && selectedAppInfo.pkg === rawPkg) ? "#dde5a2" : (mouseArea.containsMouse ? "#b0ac63" : "#3a3c2c")
+                border.width: (selectedAppInfo && selectedAppInfo.pkg === rawPkg) ? 2 : 1
 
                 MouseArea {
                     id: mouseArea
                     anchors.fill: parent
                     hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton
+                    onClicked: mouse => {
+                        let info = packageDatabase[rawPkg];
+                        if (info) {
+                            selectedAppInfo = {
+                                pkg: rawPkg,
+                                description: info.description || "No description available.",
+                                safeToRemove: info.safe_to_remove || "Unknown",
+                                category: info.category || "General"
+                            };
+                        } else {
+                            let sysCheck = isSystemCritical(rawPkg);
+                            selectedAppInfo = {
+                                pkg: rawPkg,
+                                description: "No package JSON entry available for this application.",
+                                safeToRemove: sysCheck ? "No (System Critical)" : "Yes (Third Party / User App)",
+                                category: sysCheck ? "System Package" : "User Package"
+                            };
+                        }
+                    }
                 }
 
                 RowLayout {
@@ -2488,6 +2642,54 @@ ShellRoot {
         }
 
         Process {
+            id: fetchThirdPartyAppsProc
+            command: ["bash", "-c", "adb shell pm list packages -3 | sed 's/package://'"]
+
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    thirdPartyAppsModel.clear();
+                    let lines = text.trim().split("\n");
+                    for (let i = 0; i < lines.length; i++) {
+                        let pkg = lines[i].trim();
+                        if (pkg.length > 0 && !isSystemCritical(pkg)) {
+                            thirdPartyAppsModel.append({
+                                displayName: formatDisplayName(pkg),
+                                                       rawPkg: pkg,
+                                                       isInstalled: true,
+                                                       originalState: true
+                            });
+                        }
+                    }
+                    recalculateChanges();
+                }
+            }
+        }
+
+        Process {
+            id: fetchGoogleAppsProc
+            command: ["bash", "-c", "adb shell pm list packages | sed 's/package://' | grep -iE 'com.google|com.android.chrome'"]
+
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    googleAppsModel.clear();
+                    let lines = text.trim().split("\n");
+                    for (let i = 0; i < lines.length; i++) {
+                        let pkg = lines[i].trim();
+                        if (pkg.length > 0) {
+                            googleAppsModel.append({
+                                displayName: formatDisplayName(pkg),
+                                                   rawPkg: pkg,
+                                                   isInstalled: true,
+                                                   originalState: true
+                            });
+                        }
+                    }
+                    recalculateChanges();
+                }
+            }
+        }
+
+        Process {
             id: checkDepsProc
             command: ["which", "clamscan"]
             stdout: StdioCollector {
@@ -2502,11 +2704,91 @@ ShellRoot {
             command: ["adb", "shell", "cmd", "battery", "get", "level"]
             stdout: StdioCollector {
                 onStreamFinished: {
-                    let level = text.trim();
+                    let level = text.trim().replace(/\r/g, "");
                     if (level.length > 0 && !isNaN(level)) {
                         phoneBatteryLevel = level + "%";
                     } else {
                         phoneBatteryLevel = "-";
+                    }
+                }
+            }
+        }
+
+        Process {
+            id: fetchDeviceInfoProc
+            command: [
+                "bash", "-c",
+                "echo MANUFACTURER=$(adb shell getprop ro.product.manufacturer 2>/dev/null | tr -d '\\r'); " +
+                "echo MODEL=$(adb shell getprop ro.product.model 2>/dev/null | tr -d '\\r'); " +
+                "echo ANDROID=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '\\r'); " +
+                "echo SERIAL=$(adb shell getprop ro.serialno 2>/dev/null | tr -d '\\r'); " +
+                "echo BUILDDATE=$(adb shell getprop ro.build.date 2>/dev/null | tr -d '\\r'); " +
+                "echo FIRSTAPI=$(adb shell getprop ro.product.first_api_level 2>/dev/null | tr -d '\\r')"
+            ]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let lines = text.trim().split("\n");
+                    for (let i = 0; i < lines.length; i++) {
+                        let line = lines[i].trim();
+                        if (line.startsWith("MANUFACTURER=")) {
+                            let val = line.substring(13).trim();
+                            phoneManufacturer = val.length > 0 ? val : "Unknown";
+                        } else if (line.startsWith("MODEL=")) {
+                            let val = line.substring(6).trim();
+                            phoneModel = val.length > 0 ? val : "Unknown";
+                        } else if (line.startsWith("ANDROID=")) {
+                            let val = line.substring(8).trim();
+                            phoneAndroid = val.length > 0 ? val : "Unknown";
+                        } else if (line.startsWith("SERIAL=")) {
+                            let val = line.substring(7).trim();
+                            phoneSerial = val.length > 0 ? val : "Unknown";
+                        } else if (line.startsWith("BUILDDATE=")) {
+                            let val = line.substring(10).trim();
+                            phoneBuildDate = val.length > 0 ? val : "-";
+                        } else if (line.startsWith("FIRSTAPI=")) {
+                            let api = parseInt(line.substring(9).trim());
+                            // Map first API level to approximate original release year
+                            let yearMap = {
+                                21: 2014, 22: 2015, 23: 2015, 24: 2016, 25: 2016,
+                                26: 2017, 27: 2018, 28: 2018, 29: 2019, 30: 2020,
+                                31: 2021, 32: 2022, 33: 2022, 34: 2023, 35: 2024,
+                                36: 2025
+                            };
+                            phoneReleaseYear = yearMap[api] ? String(yearMap[api]) : (isNaN(api) ? "-" : "API " + api);
+                        }
+                    }
+                }
+            }
+        }
+
+        Process {
+            id: fetchStorageProc
+            command: [
+                "bash", "-c",
+                "adb shell df -h /data 2>/dev/null | tail -1 | tr -d '\\r'"
+            ]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    // Typical df -h output: Filesystem Size Used Avail Use% Mounted
+                    // e.g. /dev/block/...  110G  45G  65G  41% /data
+                    let line = text.trim();
+                    if (line.length === 0) {
+                        storageTotal = "-";
+                        storageUsed = "-";
+                        storageAvail = "-";
+                        return;
+                    }
+                    let parts = line.split(/\s+/);
+                    // Find the size/used/avail fields (usually indices 1,2,3)
+                    if (parts.length >= 4) {
+                        // Skip filesystem name; take Size, Used, Available
+                        storageTotal = parts[1] || "-";
+                        storageUsed  = parts[2] || "-";
+                        storageAvail = parts[3] || "-";
+                    } else {
+                        storageTotal = "-";
+                        storageUsed = "-";
+                        storageAvail = "-";
                     }
                 }
             }
@@ -2590,18 +2872,77 @@ ShellRoot {
                 onStreamFinished: {
                     searchResultsModel.clear();
                     let lines = text.trim().split("\n");
+                    let q = searchPhoneProc.queryTerm.trim().toLowerCase();
+                    if (q.length === 0) return;
+
+                    // Special smart keywords
+                    let mode = "normal"; // normal | services | google | thirdparty
+                    if (q === "services" || q === "service" || q === "system services") {
+                        mode = "services";
+                    } else if (q === "google apps" || q === "google" || q === "google app") {
+                        mode = "google";
+                    } else if (q === "third party" || q === "third-party" || q === "thirdparty" ||
+                               q === "user" || q === "user apps" || q === "third party apps") {
+                        mode = "thirdparty";
+                    }
+
                     for (let i = 0; i < lines.length; i++) {
                         let pkg = lines[i].trim();
-                        if (pkg.length > 0 && searchPhoneProc.queryTerm.length > 0) {
-                            let disp = formatDisplayName(pkg);
-                            if (pkg.toLowerCase().includes(searchPhoneProc.queryTerm) || disp.toLowerCase().includes(searchPhoneProc.queryTerm)) {
-                                searchResultsModel.append({
-                                    displayName: disp,
-                                    rawPkg: pkg,
-                                    isInstalled: true,
-                                    originalState: true
-                                });
+                        if (pkg.length === 0) continue;
+
+                        let disp = formatDisplayName(pkg);
+                        let include = false;
+
+                        if (mode === "services") {
+                            // Prefer actual system/services: look at JSON category first, then heuristics
+                            let info = packageDatabase[pkg];
+                            let cat = info ? (info.category || "").toLowerCase() : "";
+                            let isServiceLike = cat.includes("system") || cat.includes("service") ||
+                                                cat.includes("core") || cat.includes("overlay") ||
+                                                cat.includes("framework") || cat.includes("provider") ||
+                                                cat.includes("hardware") || cat.includes("knox");
+                            // Fallback heuristics when no JSON entry
+                            if (!info) {
+                                isServiceLike = isSystemCritical(pkg) ||
+                                                pkg.includes(".service") ||
+                                                pkg.includes("provider") ||
+                                                pkg.includes("overlay") ||
+                                                pkg.includes("framework") ||
+                                                pkg.includes("systemui") ||
+                                                pkg.startsWith("android.") ||
+                                                pkg.startsWith("com.android.") ||
+                                                pkg.startsWith("com.samsung.") ||
+                                                pkg.startsWith("com.sec.");
                             }
+                            // Exclude clear user-facing apps
+                            if (info && (cat.includes("third-party") || cat.includes("app") && !cat.includes("system"))) {
+                                isServiceLike = false;
+                            }
+                            include = isServiceLike;
+                        } else if (mode === "google") {
+                            include = pkg.toLowerCase().includes("com.google") ||
+                                      pkg.toLowerCase() === "com.android.chrome" ||
+                                      pkg.toLowerCase().includes("com.android.chrome");
+                        } else if (mode === "thirdparty") {
+                            // Third-party / user apps: not system-critical
+                            include = !isSystemCritical(pkg) &&
+                                      !pkg.startsWith("com.google.") &&
+                                      !pkg.startsWith("com.android.") &&
+                                      !pkg.startsWith("android.") &&
+                                      !pkg.startsWith("com.samsung.") &&
+                                      !pkg.startsWith("com.sec.");
+                        } else {
+                            // Normal substring search
+                            include = pkg.toLowerCase().includes(q) || disp.toLowerCase().includes(q);
+                        }
+
+                        if (include) {
+                            searchResultsModel.append({
+                                displayName: disp,
+                                rawPkg: pkg,
+                                isInstalled: true,
+                                originalState: true
+                            });
                         }
                     }
                 }
