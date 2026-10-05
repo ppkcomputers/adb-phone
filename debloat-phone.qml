@@ -40,9 +40,22 @@ ShellRoot {
     property string detectedInfectedFile: ""
     property bool isScanning: false
 
-    // JSON Package Info Storage
-    property var packageDatabase: ({})
+    // Selected app info (description now fetched via Gemini on click)
     property var selectedAppInfo: null
+
+    // Gemini API key – loaded at runtime from a local file (never hard-coded)
+    // Looked up in this order:
+    //   1. ~/.config/debloat-phone/gemini.key
+    //   2. gemini.key next to this QML file
+    property string geminiApiKey: ""
+    property bool geminiKeyLoaded: false
+
+    // Dynamically discovered free Gemini models (populated at runtime)
+    property string geminiModel: ""                  // currently preferred model
+    property var geminiModelCandidates: ([])         // ordered list of fallback models
+    property int geminiModelIndex: 0                 // index into candidates for current attempt
+    property bool geminiModelsQueried: false
+    property var pendingGeminiPkg: ""                // package waiting while we discover models
 
     property var friendlyNames: ({
         "com.google.android.gm": "Gmail",
@@ -94,44 +107,8 @@ ShellRoot {
         "com.miui.home"
     ]
 
-    // Read google_packages.json via Process
-    // The JSON file MUST be placed in the same directory as this QML file.
-    Process {
-        id: loadJsonProc
-        property string jsonPath: Qt.resolvedUrl("google_packages.json").toString().replace("file://", "")
-        command: ["cat", jsonPath]
-        running: true
-        stdout: StdioCollector {
-            onStreamFinished: {
-                let raw = text.trim();
-                console.log("[JSON] Attempting to load from:", loadJsonProc.jsonPath, "length:", raw.length);
-                try {
-                    let parsedData = JSON.parse(raw);
-                    let db = {};
-                    for (let i = 0; i < parsedData.length; i++) {
-                        let item = parsedData[i];
-                        if (item.package) {
-                            db[item.package] = item;
-                        }
-                    }
-                    packageDatabase = db;
-                    console.log("[JSON] Successfully loaded", Object.keys(db).length, "package entries.");
-                } catch (e) {
-                    console.log("[JSON] Error parsing google_packages.json:", e);
-                    console.log("[JSON] First 200 chars of content:", raw.substring(0, 200));
-                }
-            }
-        }
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.trim().length > 0) {
-                    console.log("[JSON] cat error:", text.trim());
-                }
-            }
-        }
-    }
-
     Component.onCompleted: {
+        loadGeminiKeyProc.running = true;   // load API key from local file first
         runDiagnostics();
     }
 
@@ -354,6 +331,37 @@ ShellRoot {
                         font.bold: true
                         font.letterSpacing: 1
                     }
+
+                    // Top-right exit (X) button to close the OSD window
+                    Button {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 36
+                        height: 36
+                        text: "✕"
+                        font.pixelSize: 18
+                        font.bold: true
+                        scale: pressed ? 0.92 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 80; easing.type: Easing.InOutQuad } }
+
+                        background: Rectangle {
+                            radius: 8
+                            color: parent.pressed || parent.hovered ? "#5a2d2d" : "transparent"
+                            border.color: parent.pressed || parent.hovered ? "#d9534f" : "transparent"
+                            border.width: 1
+                        }
+
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: parent.pressed || parent.hovered ? "#ffaaaa" : "#b0ac63"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        onClicked: window.visible = false
+                    }
                 }
 
                 TabBar {
@@ -373,7 +381,6 @@ ShellRoot {
                         } else if (currentIndex === 6) {
                             secureTabHelper.checkTelemetry();
                             secureTabHelper.fetchBatteryOptimization();
-                            secureTabHelper.checkSpeedup();
                         } else {
                             monitoringTabHelper.onTabDeselected();
                         }
@@ -1232,13 +1239,10 @@ ShellRoot {
                                 id: batteryOptimizationModel
                             }
 
-                            ListModel {
-                                id: speedupModel
-                            }
-
                             property bool isChecking: false
                             property bool isBatteryChecking: false
-                            property bool isSpeedupChecking: false
+                            property bool isNuking: false
+                            property string nukeStatus: ""
 
                             function fetchBatteryOptimization() {
                                 batteryOptimizationModel.clear();
@@ -1254,70 +1258,184 @@ ShellRoot {
                                 auditTelemetryProc.running = true;
                             }
 
-                            function checkSpeedup() {
-                                speedupModel.clear();
-                                isSpeedupChecking = true;
-                                speedupAuditProc.running = true;
-                                autoTrimCacheProc.running = true;
+                            function startNukePhone() {
+                                if (isNuking) return;
+                                isNuking = true;
+                                nukeStatus = "Starting Nuke Phone sequence...\n";
+                                nukePhoneProc.running = true;
                             }
 
                             Process {
-                                id: autoTrimCacheProc
-                                command: ["adb", "shell", "pm", "trim-caches", "128G"]
-                            }
-
-                            Process {
-                                id: speedupAuditProc
+                                id: nukePhoneProc
                                 command: [
                                     "bash", "-c",
-                                    "av_pkgs=$(adb shell pm list packages | grep -iE 'avast|avg|kaspersky|bitdefender|malwarebytes|mcafee|norton|lookout|drweb|eset|avira' | sed 's/package://'); " +
-                                    "top_out=$(adb shell top -b -n 1); " +
-                                    "for pkg in $av_pkgs; do " +
-                                    "  if echo \"$top_out\" | grep -q \"$pkg\"; then " +
-                                    "    echo \"AV|$pkg|is hogging phone resources\"; " +
-                                    "  else " +
-                                    "    echo \"AV|$pkg|installed\"; " +
+                                    "echo '=== 1. Disabling window animations ==='; " +
+                                    "adb shell settings put global window_animation_scale 0.0; " +
+                                    "adb shell settings put global transition_animation_scale 0.0; " +
+                                    "adb shell settings put global animator_duration_scale 0.0; " +
+                                    "echo -n 'window_animation_scale = '; adb shell settings get global window_animation_scale; " +
+                                    "echo -n 'transition_animation_scale = '; adb shell settings get global transition_animation_scale; " +
+                                    "echo -n 'animator_duration_scale = '; adb shell settings get global animator_duration_scale; " +
+                                    "echo; " +
+                                    "echo '=== 2. Force GPU Rendering & Disable Hardware Overlays ==='; " +
+                                    "adb shell setprop debug.composition.type gpu; " +
+                                    "adb shell service call SurfaceFlinger 1008 i32 1; " +
+                                    "echo; " +
+                                    "echo '=== 3. Cap Background Processes at 2 ==='; " +
+                                    "adb shell settings put global max_phantom_processes 2; " +
+                                    "adb shell device_config put activity_manager max_phantom_processes 2; " +
+                                    "echo; " +
+                                    "echo '=== 4. Turn Off Adaptive Battery ==='; " +
+                                    "adb shell settings put global adaptive_battery_management_enabled 0; " +
+                                    "echo; " +
+                                    "echo '=== 5. Kill Location Services & Scanning Radios ==='; " +
+                                    "adb shell settings put secure location_mode 0; " +
+                                    "adb shell settings put global wifi_scan_always_enabled 0; " +
+                                    "adb shell settings put global ble_scan_always_enabled 0; " +
+                                    "echo; " +
+                                    "echo '=== 6. Trimming app caches (global) ==='; " +
+                                    "adb shell pm trim-caches 1000G; " +
+                                    "echo 'Global cache trim requested.'; " +
+                                    "echo; " +
+                                    "echo '=== 7. Clearing third-party package caches ==='; " +
+                                    "for pkg in $(adb shell pm list packages -3 2>/dev/null | sed 's/package://' | tr -d '\\r'); do " +
+                                    "  echo \"Clearing cache for: $pkg\"; " +
+                                    "  adb shell pm clear --cache-only $pkg 2>/dev/null || adb shell cmd package compile -m speed-profile -f $pkg >/dev/null 2>&1 || true; " +
+                                    "done; " +
+                                    "echo; " +
+                                    "echo '=== 8. Force-stopping third-party apps ==='; " +
+                                    "for pkg in $(adb shell pm list packages -3 2>/dev/null | sed 's/package://' | tr -d '\\r'); do " +
+                                    "  echo \"Force-stopping: $pkg\"; " +
+                                    "  adb shell am force-stop $pkg 2>/dev/null || true; " +
+                                    "done; " +
+                                    "echo; " +
+                                    "echo '=== 9. Disabling Samsung & Microsoft bloat ==='; " +
+                                    "for pkg in " +
+                                    "com.samsung.android.app.watchmanager " +
+                                    "com.samsung.android.app.watchmanagerstub " +
+                                    "com.samsung.android.bixby.agent " +
+                                    "com.samsung.android.bixby.agent.dummy " +
+                                    "com.samsung.android.bixby.wakeup " +
+                                    "com.samsung.android.app.spage " +
+                                    "com.samsung.android.ardrawing " +
+                                    "com.samsung.android.aremoji " +
+                                    "com.samsung.android.arzone " +
+                                    "com.samsung.android.beaconmanager " +
+                                    "com.samsung.android.da.daassistant " +
+                                    "com.samsung.android.game.gamehome " +
+                                    "com.samsung.android.game.gametools " +
+                                    "com.samsung.android.game.gos " +
+                                    "com.samsung.android.galaxyfinder " +
+                                    "com.samsung.android.themestore " +
+                                    "com.samsung.android.themecenter " +
+                                    "com.samsung.android.kidsinstaller " +
+                                    "com.samsung.android.app.tips " +
+                                    "com.samsung.android.lool " +
+                                    "com.samsung.android.sm.devicesecurity " +
+                                    "com.samsung.android.forest " +
+                                    "com.samsung.android.fmm " +
+                                    "com.samsung.android.app.routines " +
+                                    "com.samsung.android.rubin.app " +
+                                    "com.samsung.android.voc " +
+                                    "com.samsung.android.calendar " +
+                                    "com.samsung.android.app.contacts " +
+                                    "com.samsung.android.messaging " +
+                                    "com.samsung.android.app.notes " +
+                                    "com.samsung.android.app.reminder " +
+                                    "com.samsung.android.email.provider " +
+                                    "com.samsung.android.scloud " +
+                                    "com.samsung.android.oneconnect " +
+                                    "com.samsung.android.samsungpass " +
+                                    "com.samsung.android.samsungpassautofill " +
+                                    "com.samsung.android.authfw " +
+                                    "com.samsung.android.spay " +
+                                    "com.samsung.android.spayfw " +
+                                    "com.samsung.android.knox.containeragent " +
+                                    "com.samsung.android.knox.containercore " +
+                                    "com.samsung.android.mdm " +
+                                    "com.samsung.android.smartmirroring " +
+                                    "com.samsung.android.smartswitchassistant " +
+                                    "com.sec.android.app.samsungapps " +
+                                    "com.sec.android.app.sbrowser " +
+                                    "com.sec.android.app.popupcalculator " +
+                                    "com.sec.android.daemonapp " +
+                                    "com.sec.android.easyonehand " +
+                                    "com.sec.android.easyMover " +
+                                    "com.sec.android.easyMover.Agent " +
+                                    "com.sec.android.widgetapp.samsungapps " +
+                                    "com.microsoft.skydrive " +
+                                    "com.microsoft.appmanager " +
+                                    "com.microsoft.office.officehubrow " +
+                                    "com.microsoft.office.outlook " +
+                                    "com.microsoft.office.excel " +
+                                    "com.microsoft.office.word " +
+                                    "com.microsoft.office.powerpoint " +
+                                    "com.microsoft.office.onenote " +
+                                    "com.skype.raider " +
+                                    "com.linkedin.android " +
+                                    "com.samsung.android.app.clipboardedge " +
+                                    "com.samsung.android.app.dressroom " +
+                                    "com.samsung.android.app.ledbackcover " +
+                                    "com.samsung.android.app.mirrorlink " +
+                                    "com.samsung.android.app.simplesharing " +
+                                    "com.samsung.android.app.social " +
+                                    "com.samsung.android.app.taskedge " +
+                                    "com.samsung.android.mateagent " +
+                                    "com.samsung.android.stickercenter " +
+                                    "com.samsung.android.svcagent " +
+                                    "com.samsung.android.svoiceime " +
+                                    "com.samsung.android.visionintelligence " +
+                                    "com.samsung.android.ipsgeofence " +
+                                    "com.samsung.android.location " +
+                                    "com.samsung.android.mapsagent " +
+                                    "com.samsung.android.networkdiagnostic " +
+                                    "com.samsung.android.networkstack " +
+                                    "com.samsung.android.privateshare " +
+                                    "com.samsung.android.smartcallprovider " +
+                                    "com.samsung.android.smartface " +
+                                    "com.samsung.android.smartfitting " +
+                                    "com.samsung.android.smartscroll " +
+                                    "com.samsung.crane " +
+                                    "com.samsung.faceservice " +
+                                    "com.samsung.ipservice " +
+                                    "com.samsung.klmsagent " +
+                                    "com.samsung.oh " +
+                                    "com.samsung.rcs " +
+                                    "com.samsung.storyservice " +
+                                    "com.wsomacp " +
+                                    "com.wssyncmldm " +
+                                    "; do " +
+                                    "  if adb shell pm path $pkg >/dev/null 2>&1; then " +
+                                    "    echo \"Disabling: $pkg\"; " +
+                                    "    adb shell pm disable-user --user 0 $pkg 2>/dev/null || adb shell pm uninstall -k --user 0 $pkg 2>/dev/null || true; " +
                                     "  fi; " +
                                     "done; " +
-                                    "if echo \"$top_out\" | grep -q 'com.android.vending'; then " +
-                                    "  echo \"PLAY|com.android.vending|Google Play Store is hogging resources\"; " +
-                                    "fi"
+                                    "echo; " +
+                                    "echo '=== Nuke Phone sequence finished ==='"
                                 ]
 
                                 stdout: StdioCollector {
                                     onStreamFinished: {
-                                        speedupModel.clear();
-                                        secureTabHelper.isSpeedupChecking = false;
-                                        let lines = text.trim().split("\n");
-
-                                        for (let i = 0; i < lines.length; i++) {
-                                            let line = lines[i].trim();
-                                            if (line.length > 0) {
-                                                let parts = line.split("|");
-                                                if (parts.length === 3) {
-                                                    speedupModel.append({
-                                                        type: parts[0],
-                                                        rawPkg: parts[1],
-                                                        displayName: parts[0] === "PLAY" ? "Google Play Store" : formatDisplayName(parts[1]),
-                                                                        statusText: parts[2],
-                                                                        isToggledOn: true
-                                                    });
-                                                }
-                                            }
-                                        }
+                                        secureTabHelper.nukeStatus += text;
+                                        secureTabHelper.isNuking = false;
                                     }
                                 }
-
                                 stderr: StdioCollector {
                                     onStreamFinished: {
-                                        secureTabHelper.isSpeedupChecking = false;
+                                        if (text.trim().length > 0) {
+                                            secureTabHelper.nukeStatus += "\n[stderr]\n" + text;
+                                        }
+                                        secureTabHelper.isNuking = false;
                                     }
                                 }
-                            }
-
-                            Process {
-                                id: speedupActionProc
-                                command: []
+                                onExited: (code) => {
+                                    secureTabHelper.isNuking = false;
+                                    if (code === 0) {
+                                        secureTabHelper.nukeStatus += "\nCompleted successfully.";
+                                    } else {
+                                        secureTabHelper.nukeStatus += "\nFinished with exit code " + code;
+                                    }
+                                }
                             }
 
                             Process {
@@ -1828,46 +1946,15 @@ ShellRoot {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    spacing: 6
+                                    spacing: 10
 
-                                    RowLayout {
+                                    Text {
+                                        text: "Nuke Phone Output"
+                                        color: "#dde5a2"
+                                        font.bold: true
+                                        font.family: "Monospace"
+                                        font.pixelSize: 13
                                         Layout.fillWidth: true
-
-                                        Text {
-                                            text: "Speedup phone"
-                                            color: "#dde5a2"
-                                            font.bold: true
-                                            font.family: "Monospace"
-                                            font.pixelSize: 13
-                                            Layout.fillWidth: true
-                                        }
-
-                                        Button {
-                                            width: 90
-                                            height: 28
-                                            text: "Refresh"
-                                            font.pixelSize: 11
-                                            font.family: "Monospace"
-                                            scale: pressed ? 0.96 : 1.0
-                                            Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
-
-                                            background: Rectangle {
-                                                radius: 6
-                                                color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
-                                                border.color: Qt.darker("#555839", 1.2)
-                                                border.width: 1
-                                            }
-
-                                            contentItem: Text {
-                                                text: parent.text
-                                                font: parent.font
-                                                color: "#dde5a2"
-                                                horizontalAlignment: Text.AlignHCenter
-                                                verticalAlignment: Text.AlignVCenter
-                                            }
-
-                                            onClicked: secureTabHelper.checkSpeedup()
-                                        }
                                     }
 
                                     Rectangle {
@@ -1880,125 +1967,19 @@ ShellRoot {
 
                                         ScrollView {
                                             anchors.fill: parent
-                                            anchors.margins: 6
-                                            visible: speedupModel.count > 0
+                                            anchors.margins: 8
                                             clip: true
 
-                                            ListView {
-                                                anchors.fill: parent
-                                                model: speedupModel
-                                                spacing: 6
-
-                                                delegate: Rectangle {
-                                                    width: ListView.view.width
-                                                    height: 48
-                                                    color: Qt.rgba(0.22, 0.24, 0.21, 0.5)
-                                                    radius: 6
-                                                    border.color: "#3a3c2c"
-                                                    border.width: 1
-
-                                                    Item {
-                                                        anchors.fill: parent
-                                                        anchors.margins: 8
-
-                                                        ColumnLayout {
-                                                            anchors.left: parent.left
-                                                            anchors.right: speedupSwitch.left
-                                                            anchors.rightMargin: 8
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                            spacing: 2
-
-                                                            Text {
-                                                                text: model.displayName
-                                                                color: "#b0ac63"
-                                                                font.pixelSize: 12
-                                                                font.family: "Monospace"
-                                                                font.bold: true
-                                                                elide: Text.ElideMiddle
-                                                                Layout.fillWidth: true
-                                                            }
-
-                                                            Text {
-                                                                text: model.statusText + " (" + model.rawPkg + ")"
-                                                                color: model.statusText.indexOf("hogging") !== -1 ? "#ff7777" : "#dde5a2"
-                                                                font.pixelSize: 11
-                                                                font.family: "Monospace"
-                                                                opacity: 0.8
-                                                                elide: Text.ElideMiddle
-                                                                Layout.fillWidth: true
-                                                            }
-                                                        }
-
-                                                        Switch {
-                                                            id: speedupSwitch
-                                                            anchors.right: parent.right
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                            checked: model.isToggledOn
-
-                                                            indicator: Rectangle {
-                                                                implicitWidth: 44
-                                                                implicitHeight: 22
-                                                                radius: 11
-                                                                color: speedupSwitch.checked ? "#2a2c22" : "#1b1c1e"
-                                                                border.color: speedupSwitch.checked ? "#b0ac63" : "#444"
-                                                                border.width: 1
-
-                                                                Rectangle {
-                                                                    x: speedupSwitch.checked ? parent.width - width - 2 : 2
-                                                                    y: 2
-                                                                    width: 18
-                                                                    height: 18
-                                                                    radius: 9
-                                                                    color: speedupSwitch.checked ? "#dde5a2" : "#666666"
-
-                                                                    Behavior on x {
-                                                                        NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            onToggled: {
-                                                                model.isToggledOn = speedupSwitch.checked;
-                                                                let pkg = model.rawPkg;
-
-                                                                if (!speedupSwitch.checked) {
-                                                                    if (model.type === "AV") {
-                                                                        speedupActionProc.command = ["adb", "shell", "pm", "disable-user", "--user", "0", pkg];
-                                                                    } else if (model.type === "PLAY") {
-                                                                        speedupActionProc.command = ["bash", "-c", "adb shell am set-standby-bucket " + pkg + " restricted && adb shell appops set " + pkg + " RUN_IN_BACKGROUND ignore"];
-                                                                    }
-                                                                    speedupActionProc.running = true;
-                                                                } else {
-                                                                    if (model.type === "AV") {
-                                                                        speedupActionProc.command = ["adb", "shell", "pm", "enable", "--user", "0", pkg];
-                                                                    } else if (model.type === "PLAY") {
-                                                                        speedupActionProc.command = ["bash", "-c", "adb shell am set-standby-bucket " + pkg + " working_set && adb shell appops set " + pkg + " RUN_IN_BACKGROUND allow"];
-                                                                    }
-                                                                    speedupActionProc.running = true;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                            TextArea {
+                                                id: nukeStatusArea
+                                                readOnly: true
+                                                text: secureTabHelper.nukeStatus.length > 0 ? secureTabHelper.nukeStatus : "Press “Nuke Phone” to run the full sequence.\n\n1. Hard-kill animation scale to 0\n2. Force GPU rendering + disable hardware overlays\n3. Cap background processes at 2\n4. Turn off adaptive battery completely\n5. Kill location services + Wi-Fi/BT scanning\n6. Trim global + third-party cache\n7. Force-stop every third-party app\n8. Disable Samsung + Microsoft bloat"
+                                                color: "#dde5a2"
+                                                font.family: "Monospace"
+                                                font.pixelSize: 12
+                                                background: null
+                                                wrapMode: TextEdit.WrapAnywhere
                                             }
-                                        }
-
-                                        Text {
-                                            anchors.centerIn: parent
-                                            visible: speedupModel.count === 0 && !secureTabHelper.isSpeedupChecking
-                                            text: "No resource hogs detected. Caches trimmed."
-                                            color: "#b0ac63"
-                                            font.pixelSize: 12
-                                            font.family: "Monospace"
-                                        }
-
-                                        Text {
-                                            anchors.centerIn: parent
-                                            visible: secureTabHelper.isSpeedupChecking
-                                            text: "Scanning resource usage & trimming caches..."
-                                            color: "#b0ac63"
-                                            font.pixelSize: 12
-                                            font.family: "Monospace"
                                         }
                                     }
                                 }
@@ -2008,10 +1989,10 @@ ShellRoot {
                 }
 
                 // Selected App Information Box Output (Visible on Google, Third-Party, and Search tabs)
-                // Displays description and safe_to_remove status sourced from google_packages.json
+                // Description is fetched live from Gemini on left-click; safe-to-remove uses local heuristics
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: selectedAppInfo !== null ? 110 : 0
+                    implicitHeight: selectedAppInfo !== null ? 155 : 0
                     visible: selectedAppInfo !== null && (tabBar.currentIndex === 0 || tabBar.currentIndex === 1 || tabBar.currentIndex === 2)
                     color: Qt.rgba(0.22, 0.24, 0.21, 0.95)
                     radius: 8
@@ -2038,7 +2019,7 @@ ShellRoot {
                             elide: Text.ElideMiddle
                         }
 
-                        // Safe to remove status (from JSON)
+                        // Safe to remove status
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -2060,17 +2041,25 @@ ShellRoot {
                             }
                         }
 
-                        // Description (from JSON)
-                        Text {
-                            text: selectedAppInfo ? selectedAppInfo.description : ""
-                            color: "#c8d0a0"
-                            font.pixelSize: 12
-                            font.family: "Monospace"
-                            wrapMode: Text.WordWrap
+                        // Description (fetched live from Gemini) – scrollable so full text is readable
+                        ScrollView {
+                            id: descScroll
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            maximumLineCount: 3
-                            elide: Text.ElideRight
+                            clip: true
+                            contentWidth: availableWidth
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                            Text {
+                                width: descScroll.availableWidth
+                                text: selectedAppInfo ? selectedAppInfo.description : ""
+                                color: "#c8d0a0"
+                                font.pixelSize: 12
+                                font.family: "Monospace"
+                                wrapMode: Text.WordWrap
+                                // Full content is shown; user can scroll when text exceeds the panel height
+                            }
                         }
                     }
                 }
@@ -2078,6 +2067,38 @@ ShellRoot {
                 Column {
                     Layout.fillWidth: true
                     spacing: 8
+
+                    Button {
+                        id: nukeBtn
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 240
+                        height: 44
+                        visible: tabBar.currentIndex === 6
+                        text: secureTabHelper.isNuking ? "Nuking…" : "Nuke Phone"
+                        font.pixelSize: 14
+                        font.family: "Monospace"
+                        font.bold: true
+                        enabled: !secureTabHelper.isNuking
+                        scale: pressed ? 0.96 : 1.0
+                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
+
+                        background: Rectangle {
+                            radius: 8
+                            color: parent.enabled ? (parent.pressed ? Qt.darker("#5a2d2d", 1.1) : "#4a2424") : "#252627"
+                            border.color: parent.enabled ? "#d9534f" : "#3a3a3a"
+                            border.width: 1
+                        }
+
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: parent.enabled ? "#ffaaaa" : "#666666"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+
+                        onClicked: secureTabHelper.startNukePhone()
+                    }
 
                     Button {
                         anchors.horizontalCenter: parent.horizontalCenter
@@ -2335,35 +2356,6 @@ ShellRoot {
 
                         onClicked: applyPendingChanges()
                     }
-
-                    Button {
-                        id: closeBtn
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        width: 240
-                        height: 44
-                        text: "Close OSD"
-                        font.pixelSize: 14
-                        font.family: "Monospace"
-                        scale: pressed ? 0.96 : 1.0
-                        Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.InOutQuad } }
-
-                        background: Rectangle {
-                            radius: 8
-                            color: parent.pressed ? Qt.darker("#363c30", 1.1) : "#363c30"
-                            border.color: Qt.darker("#555839", 1.2)
-                            border.width: 1
-                        }
-
-                        contentItem: Text {
-                            text: parent.text
-                            font: parent.font
-                            color: "#dde5a2"
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-
-                        onClicked: window.visible = false
-                    }
                 }
 
                 Rectangle {
@@ -2535,23 +2527,15 @@ ShellRoot {
                     hoverEnabled: true
                     acceptedButtons: Qt.LeftButton
                     onClicked: mouse => {
-                        let info = packageDatabase[rawPkg];
-                        if (info) {
-                            selectedAppInfo = {
-                                pkg: rawPkg,
-                                description: info.description || "No description available.",
-                                safeToRemove: info.safe_to_remove || "Unknown",
-                                category: info.category || "General"
-                            };
-                        } else {
-                            let sysCheck = isSystemCritical(rawPkg);
-                            selectedAppInfo = {
-                                pkg: rawPkg,
-                                description: "No package JSON entry available for this application.",
-                                safeToRemove: sysCheck ? "No (System Critical)" : "Yes (Third Party / User App)",
-                                category: sysCheck ? "System Package" : "User Package"
-                            };
-                        }
+                        let sysCheck = isSystemCritical(rawPkg);
+                        selectedAppInfo = {
+                            pkg: rawPkg,
+                            description: "Querying Gemini for safety assessment and description…",
+                            safeToRemove: "…",
+                            category: sysCheck ? "System Package" : "User Package"
+                        };
+                        // Query Gemini for safety verdict + description
+                        geminiDescProc.queryPkg(rawPkg);
                     }
                 }
 
@@ -2649,16 +2633,23 @@ ShellRoot {
                 onStreamFinished: {
                     thirdPartyAppsModel.clear();
                     let lines = text.trim().split("\n");
+                    let items = [];
                     for (let i = 0; i < lines.length; i++) {
                         let pkg = lines[i].trim();
                         if (pkg.length > 0 && !isSystemCritical(pkg)) {
-                            thirdPartyAppsModel.append({
+                            items.push({
                                 displayName: formatDisplayName(pkg),
-                                                       rawPkg: pkg,
-                                                       isInstalled: true,
-                                                       originalState: true
+                                       rawPkg: pkg,
+                                       isInstalled: true,
+                                       originalState: true
                             });
                         }
+                    }
+                    items.sort(function(a, b) {
+                        return a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase());
+                    });
+                    for (let j = 0; j < items.length; j++) {
+                        thirdPartyAppsModel.append(items[j]);
                     }
                     recalculateChanges();
                 }
@@ -2673,16 +2664,23 @@ ShellRoot {
                 onStreamFinished: {
                     googleAppsModel.clear();
                     let lines = text.trim().split("\n");
+                    let items = [];
                     for (let i = 0; i < lines.length; i++) {
                         let pkg = lines[i].trim();
                         if (pkg.length > 0) {
-                            googleAppsModel.append({
+                            items.push({
                                 displayName: formatDisplayName(pkg),
-                                                   rawPkg: pkg,
-                                                   isInstalled: true,
-                                                   originalState: true
+                                       rawPkg: pkg,
+                                       isInstalled: true,
+                                       originalState: true
                             });
                         }
+                    }
+                    items.sort(function(a, b) {
+                        return a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase());
+                    });
+                    for (let j = 0; j < items.length; j++) {
+                        googleAppsModel.append(items[j]);
                     }
                     recalculateChanges();
                 }
@@ -2882,69 +2880,56 @@ ShellRoot {
                     } else if (q === "google apps" || q === "google" || q === "google app") {
                         mode = "google";
                     } else if (q === "third party" || q === "third-party" || q === "thirdparty" ||
-                               q === "user" || q === "user apps" || q === "third party apps") {
+                        q === "user" || q === "user apps" || q === "third party apps") {
                         mode = "thirdparty";
-                    }
-
-                    for (let i = 0; i < lines.length; i++) {
-                        let pkg = lines[i].trim();
-                        if (pkg.length === 0) continue;
-
-                        let disp = formatDisplayName(pkg);
-                        let include = false;
-
-                        if (mode === "services") {
-                            // Prefer actual system/services: look at JSON category first, then heuristics
-                            let info = packageDatabase[pkg];
-                            let cat = info ? (info.category || "").toLowerCase() : "";
-                            let isServiceLike = cat.includes("system") || cat.includes("service") ||
-                                                cat.includes("core") || cat.includes("overlay") ||
-                                                cat.includes("framework") || cat.includes("provider") ||
-                                                cat.includes("hardware") || cat.includes("knox");
-                            // Fallback heuristics when no JSON entry
-                            if (!info) {
-                                isServiceLike = isSystemCritical(pkg) ||
-                                                pkg.includes(".service") ||
-                                                pkg.includes("provider") ||
-                                                pkg.includes("overlay") ||
-                                                pkg.includes("framework") ||
-                                                pkg.includes("systemui") ||
-                                                pkg.startsWith("android.") ||
-                                                pkg.startsWith("com.android.") ||
-                                                pkg.startsWith("com.samsung.") ||
-                                                pkg.startsWith("com.sec.");
-                            }
-                            // Exclude clear user-facing apps
-                            if (info && (cat.includes("third-party") || cat.includes("app") && !cat.includes("system"))) {
-                                isServiceLike = false;
-                            }
-                            include = isServiceLike;
-                        } else if (mode === "google") {
-                            include = pkg.toLowerCase().includes("com.google") ||
-                                      pkg.toLowerCase() === "com.android.chrome" ||
-                                      pkg.toLowerCase().includes("com.android.chrome");
-                        } else if (mode === "thirdparty") {
-                            // Third-party / user apps: not system-critical
-                            include = !isSystemCritical(pkg) &&
-                                      !pkg.startsWith("com.google.") &&
-                                      !pkg.startsWith("com.android.") &&
-                                      !pkg.startsWith("android.") &&
-                                      !pkg.startsWith("com.samsung.") &&
-                                      !pkg.startsWith("com.sec.");
-                        } else {
-                            // Normal substring search
-                            include = pkg.toLowerCase().includes(q) || disp.toLowerCase().includes(q);
                         }
 
-                        if (include) {
-                            searchResultsModel.append({
-                                displayName: disp,
-                                rawPkg: pkg,
-                                isInstalled: true,
-                                originalState: true
-                            });
+                        for (let i = 0; i < lines.length; i++) {
+                            let pkg = lines[i].trim();
+                            if (pkg.length === 0) continue;
+
+                            let disp = formatDisplayName(pkg);
+                            let include = false;
+
+                            if (mode === "services") {
+                                // Heuristics for system / service-like packages
+                                let isServiceLike = isSystemCritical(pkg) ||
+                                    pkg.includes(".service") ||
+                                    pkg.includes("provider") ||
+                                    pkg.includes("overlay") ||
+                                    pkg.includes("framework") ||
+                                    pkg.includes("systemui") ||
+                                    pkg.startsWith("android.") ||
+                                    pkg.startsWith("com.android.") ||
+                                    pkg.startsWith("com.samsung.") ||
+                                    pkg.startsWith("com.sec.");
+                                include = isServiceLike;
+                            } else if (mode === "google") {
+                                include = pkg.toLowerCase().includes("com.google") ||
+                                pkg.toLowerCase() === "com.android.chrome" ||
+                                pkg.toLowerCase().includes("com.android.chrome");
+                            } else if (mode === "thirdparty") {
+                                // Third-party / user apps: not system-critical
+                                include = !isSystemCritical(pkg) &&
+                                !pkg.startsWith("com.google.") &&
+                                !pkg.startsWith("com.android.") &&
+                                !pkg.startsWith("android.") &&
+                                !pkg.startsWith("com.samsung.") &&
+                                !pkg.startsWith("com.sec.");
+                            } else {
+                                // Normal substring search
+                                include = pkg.toLowerCase().includes(q) || disp.toLowerCase().includes(q);
+                            }
+
+                            if (include) {
+                                searchResultsModel.append({
+                                    displayName: disp,
+                                    rawPkg: pkg,
+                                    isInstalled: true,
+                                    originalState: true
+                                });
+                            }
                         }
-                    }
                 }
             }
         }
@@ -3019,6 +3004,418 @@ ShellRoot {
                         launchProc.running = true;
                     }
                     pendingPlayStorePkg = "";
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Load Gemini API key from a local file (never hard-coded).
+        // Search order:
+        //   1. ~/.config/debloat-phone/gemini.key
+        //   2. gemini.key next to this QML file
+        // ------------------------------------------------------------------
+        Process {
+            id: loadGeminiKeyProc
+            // Resolve local gemini.key relative to this QML file so it works
+            // regardless of the current working directory.
+            property string localKeyPath: Qt.resolvedUrl("gemini.key").toString().replace("file://", "")
+            command: [
+                "bash", "-c",
+                "KEYFILE=\"$HOME/.config/debloat-phone/gemini.key\"; " +
+                "LOCALKEY=\"" + localKeyPath + "\"; " +
+                "if [ -f \"$KEYFILE\" ]; then cat \"$KEYFILE\"; " +
+                "elif [ -f \"$LOCALKEY\" ]; then cat \"$LOCALKEY\"; " +
+                "else echo \"\"; fi"
+            ]
+            running: false
+
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let key = text.trim().replace(/\r/g, "");
+                    // Strip possible "Bearer " or quotes if user added them by mistake
+                    if (key.toLowerCase().startsWith("bearer ")) {
+                        key = key.substring(7).trim();
+                    }
+                    if ((key.startsWith("\"") && key.endsWith("\"")) ||
+                        (key.startsWith("'") && key.endsWith("'"))) {
+                        key = key.substring(1, key.length - 1);
+                    }
+                    geminiApiKey = key;
+                    geminiKeyLoaded = true;
+                    if (key.length > 0) {
+                        console.log("[Gemini] API key loaded successfully (length " + key.length + ")");
+                    } else {
+                        console.log("[Gemini] No API key found. Place your key in ~/.config/debloat-phone/gemini.key or gemini.key next to the QML file.");
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    geminiKeyLoaded = true;
+                    if (text.trim().length > 0) {
+                        console.log("[Gemini] Key load error:", text.trim());
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Gemini model discovery + description lookup
+        // On first use we query the ListModels endpoint, prefer free Flash
+        // models, then cache the choice for subsequent package lookups.
+        // ------------------------------------------------------------------
+        Process {
+            id: geminiListModelsProc
+            command: []
+            running: false
+
+            function startDiscovery() {
+                command = [
+                    "bash", "-c",
+                    "curl -s -X GET 'https://generativelanguage.googleapis.com/v1beta/models' " +
+                    "-H 'x-goog-api-key: " + geminiApiKey + "'"
+                ];
+                running = true;
+            }
+
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let chosen = "";
+                    try {
+                        let resp = JSON.parse(text.trim());
+                        let models = resp.models || [];
+                        // Collect candidates that support generateContent
+                        let candidates = [];
+                        for (let i = 0; i < models.length; i++) {
+                            let m = models[i];
+                            let name = (m.name || "").replace(/^models\//, "");
+                            let methods = m.supportedGenerationMethods || [];
+                            if (methods.indexOf("generateContent") === -1) continue;
+                            // Prefer free-tier friendly flash models; de-prioritise pro / thinking / experimental
+                            let score = 0;
+                            let lower = name.toLowerCase();
+                            if (lower.includes("flash")) score += 50;
+                            if (lower.includes("lite")) score += 10;
+                            if (lower.includes("2.5") || lower.includes("2.0") || lower.includes("1.5")) score += 20;
+                            if (lower.includes("3.")) score += 25;          // newer generations
+                            if (lower.includes("pro")) score -= 30;
+                            if (lower.includes("ultra")) score -= 40;
+                            if (lower.includes("thinking") || lower.includes("exp")) score -= 15;
+                            candidates.push({ name: name, score: score });
+                        }
+                        // Sort highest score first
+                        candidates.sort(function(a, b) { return b.score - a.score; });
+                        if (candidates.length > 0) {
+                            chosen = candidates[0].name;
+                            // Keep the full ordered list for automatic fallback on high-demand errors
+                            let names = [];
+                            for (let c = 0; c < candidates.length; c++) {
+                                names.push(candidates[c].name);
+                            }
+                            geminiModelCandidates = names;
+                            console.log("[Gemini] Selected primary model:", chosen,
+                                        "(score", candidates[0].score + "). Fallbacks:", names.slice(1, 6).join(", "));
+                        }
+                    } catch (e) {
+                        console.log("[Gemini] Failed to parse ListModels response:", e);
+                    }
+
+                    // Fallbacks if discovery failed or returned nothing useful
+                    if (chosen === "") {
+                        chosen = "gemini-2.5-flash";
+                        geminiModelCandidates = [
+                            "gemini-2.5-flash",
+                            "gemini-2.0-flash",
+                            "gemini-1.5-flash",
+                            "gemini-2.5-flash-lite",
+                            "gemini-1.5-flash-8b"
+                        ];
+                        console.log("[Gemini] Using fallback model list, primary:", chosen);
+                    }
+
+                    geminiModel = chosen;
+                    geminiModelIndex = 0;
+                    geminiModelsQueried = true;
+
+                    // If a package was waiting, continue with the description query
+                    if (pendingGeminiPkg !== "") {
+                        let pkg = pendingGeminiPkg;
+                        pendingGeminiPkg = "";
+                        geminiDescProc.doGenerate(pkg);
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    if (text.trim().length > 0) {
+                        console.log("[Gemini] ListModels stderr:", text.trim().substring(0, 200));
+                    }
+                    // Still mark as queried and use a safe fallback list
+                    if (!geminiModelsQueried) {
+                        geminiModel = "gemini-2.5-flash";
+                        geminiModelCandidates = [
+                            "gemini-2.5-flash",
+                            "gemini-2.0-flash",
+                            "gemini-1.5-flash",
+                            "gemini-2.5-flash-lite",
+                            "gemini-1.5-flash-8b"
+                        ];
+                        geminiModelIndex = 0;
+                        geminiModelsQueried = true;
+                        if (pendingGeminiPkg !== "") {
+                            let pkg = pendingGeminiPkg;
+                            pendingGeminiPkg = "";
+                            geminiDescProc.doGenerate(pkg);
+                        }
+                    }
+                }
+            }
+        }
+
+        Process {
+            id: geminiDescProc
+            property string currentPkg: ""
+            command: []
+
+            // Public entry point – discovers model on first call
+            function queryPkg(pkg) {
+                currentPkg = pkg;
+
+                // Wait until the key has been loaded from disk
+                if (!geminiKeyLoaded) {
+                    // Key loader is still running – re-try shortly
+                    Qt.callLater(function() { geminiDescProc.queryPkg(pkg); });
+                    return;
+                }
+
+                if (geminiApiKey.length === 0) {
+                    if (selectedAppInfo && selectedAppInfo.pkg === pkg) {
+                        selectedAppInfo = {
+                            pkg: pkg,
+                            description: "No Gemini API key found.\n\nCreate the file:\n  ~/.config/debloat-phone/gemini.key\n(or place gemini.key next to this QML file)\nand put your free API key inside it (one line only).\n\nGet a key at: https://aistudio.google.com/apikey",
+                            safeToRemove: "—",
+                            category: selectedAppInfo.category
+                        };
+                    }
+                    return;
+                }
+
+                if (!geminiModelsQueried) {
+                    // First time: discover available free models, then continue
+                    pendingGeminiPkg = pkg;
+                    if (selectedAppInfo && selectedAppInfo.pkg === pkg) {
+                        selectedAppInfo = {
+                            pkg: pkg,
+                            description: "Discovering available Gemini models…",
+                            safeToRemove: "…",
+                            category: selectedAppInfo.category
+                        };
+                    }
+                    geminiListModelsProc.startDiscovery();
+                    return;
+                }
+                doGenerate(pkg);
+            }
+
+            // Actual generateContent call once a model is known
+            function doGenerate(pkg) {
+                currentPkg = pkg;
+
+                // Pick the model for this attempt
+                let model = geminiModel || "gemini-2.5-flash";
+                if (geminiModelCandidates.length > 0) {
+                    if (geminiModelIndex < 0 || geminiModelIndex >= geminiModelCandidates.length) {
+                        geminiModelIndex = 0;
+                    }
+                    model = geminiModelCandidates[geminiModelIndex];
+                }
+
+                // Ask for a clear safety verdict first, then a longer description
+                let prompt =
+                    "For the Android package \"" + pkg + "\":\n" +
+                    "1. First line exactly in this format: Safe to remove: Yes   OR   Safe to remove: No   OR   Safe to remove: Caution\n" +
+                    "2. Second line: a short reason (max 15 words).\n" +
+                    "3. Then a blank line followed by a concise description of what the package does (max 80 words).\n" +
+                    "Focus on a regular user's perspective. Do not mention this prompt.";
+                let bodyObj = {
+                    contents: [{
+                        parts: [{ text: prompt }]
+                    }]
+                };
+                let jsonBody = JSON.stringify(bodyObj);
+                let escapedBody = jsonBody.replace(/'/g, "'\\''");
+                command = [
+                    "bash", "-c",
+                    "curl -s -X POST 'https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent' " +
+                    "-H 'x-goog-api-key: " + geminiApiKey + "' " +
+                    "-H 'Content-Type: application/json' " +
+                    "-d '" + escapedBody + "'"
+                ];
+                running = true;
+            }
+
+            // Returns true if the error message indicates the model is overloaded / high demand
+            function isHighDemandError(msg) {
+                if (!msg) return false;
+                let m = msg.toLowerCase();
+                return m.includes("high demand") ||
+                       m.includes("high volume") ||
+                       m.includes("currently experiencing") ||
+                       m.includes("resource exhausted") ||
+                       m.includes("rate limit") ||
+                       m.includes("quota") ||
+                       m.includes("try again later") ||
+                       m.includes("overloaded") ||
+                       m.includes("unavailable") ||
+                       m.includes("429") ||
+                       m.includes("503");
+            }
+
+            // Try the next model in the candidate list. Returns true if a retry was started.
+            function tryNextModel(pkg) {
+                if (geminiModelCandidates.length === 0) return false;
+                let next = geminiModelIndex + 1;
+                if (next >= geminiModelCandidates.length) {
+                    console.log("[Gemini] All candidate models exhausted.");
+                    return false;
+                }
+                geminiModelIndex = next;
+                let nextModel = geminiModelCandidates[next];
+                console.log("[Gemini] Switching to fallback model:", nextModel);
+                if (selectedAppInfo && selectedAppInfo.pkg === pkg) {
+                    selectedAppInfo = {
+                        pkg: pkg,
+                        description: "Model busy – trying " + nextModel + "…",
+                        safeToRemove: "…",
+                        category: selectedAppInfo.category
+                    };
+                }
+                doGenerate(pkg);
+                return true;
+            }
+
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    let safeStatus = "Unknown";
+                    let desc = "No description returned from Gemini.";
+                    let shouldRetry = false;
+                    let errorMsg = "";
+
+                    try {
+                        let resp = JSON.parse(text.trim());
+                        if (resp.candidates && resp.candidates.length > 0 &&
+                            resp.candidates[0].content && resp.candidates[0].content.parts &&
+                            resp.candidates[0].content.parts.length > 0) {
+                            let raw = resp.candidates[0].content.parts[0].text.trim();
+
+                            // Parse structured response
+                            // Expected:
+                            // Safe to remove: Yes/No/Caution
+                            // short reason
+                            //
+                            // longer description...
+                            let lines = raw.split(/\r?\n/);
+                            let firstLine = (lines[0] || "").trim();
+                            let lowerFirst = firstLine.toLowerCase();
+
+                            if (lowerFirst.startsWith("safe to remove:")) {
+                                let verdict = firstLine.substring("safe to remove:".length).trim();
+                                // Normalise to Yes / No / Caution
+                                let vLower = verdict.toLowerCase();
+                                if (vLower.startsWith("yes")) safeStatus = "Yes";
+                                else if (vLower.startsWith("no")) safeStatus = "No";
+                                else if (vLower.startsWith("caution") || vLower.startsWith("maybe")) safeStatus = "Caution";
+                                else safeStatus = verdict;   // keep original if unexpected
+
+                                // Collect remaining text as description (skip blank lines after the verdict)
+                                let descLines = [];
+                                let started = false;
+                                for (let i = 1; i < lines.length; i++) {
+                                    let ln = lines[i];
+                                    if (!started && ln.trim() === "") continue;
+                                    started = true;
+                                    descLines.push(ln);
+                                }
+                                if (descLines.length > 0) {
+                                    desc = descLines.join("\n").trim();
+                                } else {
+                                    desc = raw;   // fallback
+                                }
+                            } else {
+                                // Model did not follow the format – use whole text as description
+                                // and try a simple heuristic for safety
+                                desc = raw;
+                                if (raw.toLowerCase().includes("not safe") || raw.toLowerCase().includes("do not remove") ||
+                                    raw.toLowerCase().includes("critical") || raw.toLowerCase().includes("essential")) {
+                                    safeStatus = "No";
+                                } else if (raw.toLowerCase().includes("safe to remove") || raw.toLowerCase().includes("can be removed")) {
+                                    safeStatus = "Yes";
+                                } else {
+                                    safeStatus = "Caution";
+                                }
+                            }
+
+                            // Success – remember this model as the preferred one for next time
+                            if (geminiModelCandidates.length > 0 && geminiModelIndex < geminiModelCandidates.length) {
+                                geminiModel = geminiModelCandidates[geminiModelIndex];
+                            }
+                        } else if (resp.error) {
+                            errorMsg = resp.error.message || JSON.stringify(resp.error);
+                            desc = "Gemini error: " + errorMsg;
+                            safeStatus = "Unknown";
+                            if (isHighDemandError(errorMsg)) {
+                                shouldRetry = true;
+                            }
+                        }
+                    } catch (e) {
+                        // Sometimes the API returns a plain-text error instead of JSON
+                        let rawText = text.trim();
+                        if (isHighDemandError(rawText)) {
+                            errorMsg = rawText;
+                            shouldRetry = true;
+                            desc = "Gemini error: " + rawText.substring(0, 180);
+                        } else {
+                            desc = "Failed to parse Gemini response: " + e + "\nRaw: " + rawText.substring(0, 120);
+                        }
+                        safeStatus = "Unknown";
+                    }
+
+                    // Automatic fallback on high-demand / overloaded models
+                    if (shouldRetry && selectedAppInfo && selectedAppInfo.pkg === geminiDescProc.currentPkg) {
+                        if (tryNextModel(geminiDescProc.currentPkg)) {
+                            return;   // retry started – do not update UI with the error yet
+                        }
+                    }
+
+                    // Only update if the user has not clicked a different package in the meantime
+                    if (selectedAppInfo && selectedAppInfo.pkg === geminiDescProc.currentPkg) {
+                        selectedAppInfo = {
+                            pkg: geminiDescProc.currentPkg,
+                            description: desc,
+                            safeToRemove: safeStatus,
+                            category: selectedAppInfo.category
+                        };
+                    }
+                }
+            }
+            stderr: StdioCollector {
+                onStreamFinished: {
+                    if (text.trim().length === 0) return;
+                    let err = text.trim();
+                    // Attempt automatic fallback on high-demand style errors reported via stderr
+                    if (isHighDemandError(err) && selectedAppInfo && selectedAppInfo.pkg === geminiDescProc.currentPkg) {
+                        if (tryNextModel(geminiDescProc.currentPkg)) {
+                            return;
+                        }
+                    }
+                    if (selectedAppInfo && selectedAppInfo.pkg === geminiDescProc.currentPkg) {
+                        selectedAppInfo = {
+                            pkg: geminiDescProc.currentPkg,
+                            description: "Gemini query error: " + err.substring(0, 150),
+                            safeToRemove: selectedAppInfo.safeToRemove,
+                            category: selectedAppInfo.category
+                        };
+                    }
                 }
             }
         }
