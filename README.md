@@ -4,47 +4,60 @@
 
 ## Overview
 
-This project provides a Wayland-compatible on-screen display (OSD) implemented in QML for Quickshell. It enables efficient management of applications on an Android device connected via USB debugging (ADB). The interface allows selective removal of pre-installed Google and third-party applications (debloating), restoration of previously uninstalled packages, file transfer between the host system and the device, process monitoring, and system reboot controls.
+Debloat Android Phone is a Wayland-compatible on-screen display (OSD) written in QML for [Quickshell](https://github.com/outfoxxed/quickshell). It provides a convenient graphical interface for managing applications on an Android device connected via USB debugging (ADB).
 
-The OSD appears as a semi-transparent panel anchored to the right edge of the screen. It queries the connected device for installed and uninstalled packages, presents them in categorized lists with toggle controls, and executes the corresponding ADB commands when changes are applied.
+The panel appears as a semi-transparent window anchored to the right edge of the screen. It queries the connected device for installed packages, presents them in organised lists with toggle controls, and executes the corresponding ADB commands when changes are applied. Additional tools for file transfer, process monitoring, telemetry hardening, and system reboot are also included.
 
 ## Features
 
 - **Google Apps Tab**  
-  Displays Google-related packages (including Chrome). Critical system components are automatically protected and excluded from modification.
+  Lists Google-related packages (including Chrome). Critical system components are automatically protected.
 
 - **Third-Party Apps Tab**  
-  Lists launchable third-party applications and additional uninstalled packages that meet filtering criteria.
+  Shows user-installed and other non-system packages that can be safely managed.
 
 - **Search Tab**  
-  Performs real-time filtering of all packages on the device by package name or friendly display name.
+  Real-time filtering of all packages by package name or friendly display name. Supports smart keywords such as `services`, `google apps`, and `third party`.
 
 - **Reboot Tab**  
-  Provides one-click reboot into Recovery mode or Bootloader / Fastboot mode.
+  One-click reboot into Recovery mode or Bootloader / Fastboot mode.
 
 - **Shared Tab**  
-  Manages a dedicated folder (`/sdcard/SharedPC`) on the device. Supports drag-and-drop upload from the host and individual file download to `~/Downloads`.
+  Manages the `/sdcard/Download` folder on the device. Supports drag-and-drop upload from the host and individual file download to `~/Downloads`. Optional ClamAV malware scanning of the downloads folder is available when `clamscan` is installed on the host.
 
 - **Monitor Tab**  
-  Displays a live, auto-refreshing view of processes obtained via `adb shell top`.
+  Live, auto-refreshing view of processes obtained via `adb shell top`.
+
+- **Secure Phone Tab**  
+  - Detects and allows disabling of common telemetry / analytics settings  
+  - Battery optimisation controls for third-party apps  
+  - “Nuke Phone” sequence that applies a comprehensive set of privacy and performance hardening commands
+
+- **Live Package Descriptions (Gemini)**  
+  Left-click any package to obtain a concise description and a safety assessment (“Safe to remove: Yes / No / Caution”) powered by Google Gemini. Requires a free API key (see below).
 
 - **Device Information Bar**  
-  Continuously shows manufacturer, model, Android version, and serial number.
+  Continuously displays manufacturer, model, Android version, serial number, battery level, storage usage, and update status.
 
 - **Screen Mirroring**  
-  Optional integration with scrcpy for an embedded, borderless preview window of the phone screen.
+  Optional integration with `scrcpy` for an embedded preview of the phone screen.
 
 - **Safety Mechanisms**  
-  Maintains an extensive list of protected packages and pattern-based filters that prevent accidental modification of essential system components.
+  Extensive protected-package list and pattern-based filters prevent accidental modification of essential system components.
 
 ## Requirements
 
-- A Linux distribution running a Wayland compositor compatible with Quickshell.
-- Android device with USB debugging enabled and authorized for the host.
-- `adb` (Android Debug Bridge) and `scrcpy` installed on the host system.
+- Linux distribution running a Wayland compositor supported by Quickshell
+- Android device with USB debugging enabled and authorised for the host
+- `adb` (Android Debug Bridge) installed on the host
+- `scrcpy` (optional, for screen mirroring)
+- `clamscan` (optional, for malware scanning of the downloads folder)
+- Free Google Gemini API key (optional, for package descriptions)
 
-## Installation of ADB and Related Tools on Arch Linux
+## Installation of ADB and Related Tools (Arch Linux)
 
+```bash
+sudo pacman -S android-tools scrcpy clamav
 Install the required packages with the following command:
 
 ```bash
