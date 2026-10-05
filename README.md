@@ -62,3 +62,17 @@ Install the required packages with the following command:
 
 ```bash
 sudo pacman -S android-tools scrcpy
+
+## Gemini API Key (Optional – Package Descriptions)
+
+To enable live package descriptions and safety assessments:
+
+1. Obtain a free API key from [Google AI Studio](https://aistudio.google.com/apikey).
+
+2. Create one of the following files and paste the key into it (one line only):
+
+   **Recommended location**
+   ```bash
+   mkdir -p ~/.config/debloat-phone
+   echo "YOUR_API_KEY_HERE" > ~/.config/debloat-phone/gemini.key
+   chmod 600 ~/.config/debloat-phone/gemini.key
