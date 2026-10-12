@@ -54,6 +54,13 @@ The panel appears as a semi-transparent window anchored to the right edge of the
 - `clamscan` (optional, for malware scanning of the downloads folder)
 - Free Google Gemini API key (optional, for package descriptions)
 
+## Gemini API key 
+
+Open the gemini.key file and paste your gemini api key in there.
+
+# URL
+https://aistudio.google.com/api-keys
+
 ## Installation of ADB and Related Tools (Arch Linux)
 
 ```bash
