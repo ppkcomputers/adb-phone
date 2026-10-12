@@ -58,7 +58,7 @@ The panel appears as a semi-transparent window anchored to the right edge of the
 
 Open the gemini.key file and paste your gemini api key in there.
 
-# Google Gemini API key generate URL
+## Google Gemini API key generate URL
 https://aistudio.google.com/api-keys
 
 
