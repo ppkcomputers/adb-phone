@@ -8,6 +8,9 @@ Debloat Android Phone is a Wayland-compatible on-screen display (OSD) written in
 
 The panel appears as a semi-transparent window anchored to the right edge of the screen. It queries the connected device for installed packages, presents them in organised lists with toggle controls, and executes the corresponding ADB commands when changes are applied. Additional tools for file transfer, process monitoring, telemetry hardening, and system reboot are also included.
 
+## Run qml command
+quickshell -p debloat-phone.qml
+
 ## Features
 
 - **Google Apps Tab**  
