@@ -192,6 +192,71 @@ ShellRoot {
             return false;
     }
 
+    // Narrower filter for the Battery tab: hide only packages that must not be
+    // deep-slept (phone, contacts, system UI, settings, core providers, GMS).
+    // Preinstalled apps such as Camera, Calendar, Radio, Gallery remain listed.
+    function isBatteryListExcluded(pkg) {
+        if (!pkg) return true;
+        let n = pkg.toLowerCase();
+
+        // Explicit critical packages
+        let criticalExact = [
+            "android",
+            "com.android.systemui",
+            "com.android.settings",
+            "com.android.phone",
+            "com.android.providers.telephony",
+            "com.android.providers.contacts",
+            "com.android.providers.settings",
+            "com.android.providers.media",
+            "com.android.packageinstaller",
+            "com.android.keychain",
+            "com.android.shell",
+            "com.android.permissioncontroller",
+            "com.android.bluetooth",
+            "com.android.nfc",
+            "com.android.se",
+            "com.google.android.gms",
+            "com.google.android.gsf",
+            "com.samsung.android.incallui",
+            "com.samsung.android.dialer",
+            "com.samsung.android.app.contacts",
+            "com.samsung.android.providers.contacts",
+            "com.sec.android.app.launcher",
+            "com.samsung.android.launcher",
+            "com.miui.home"
+        ];
+        if (criticalExact.indexOf(pkg) !== -1 || criticalExact.indexOf(n) !== -1)
+            return true;
+
+        // Pattern-based critical / framework noise
+        if (n.includes("systemui") ||
+            n.includes("incallui") ||
+            n.includes(".dialer") ||
+            n.includes("com.android.phone") ||
+            n.includes("providers.telephony") ||
+            n.includes("providers.contacts") ||
+            n.includes("providers.settings") ||
+            n.includes("permissioncontroller") ||
+            n.includes("packageinstaller") ||
+            n.includes(".overlay.") ||
+            n.includes(".framework.") ||
+            n.includes("vendor.") ||
+            n.includes("qualcomm") ||
+            n.includes(".qti.") ||
+            n.includes("networkstack") ||
+            n.includes("cellbroadcast") ||
+            n.includes("keychain") ||
+            n.includes("com.android.shell") ||
+            n.includes("com.google.android.gms") ||
+            n.includes("com.google.android.gsf") ||
+            n.includes("wssyncmldm") ||
+            n.includes("com.android.vending")) {
+            return true;
+        }
+        return false;
+    }
+
     
     function isSystemNetworkService(pkg) {
         let n = (pkg || "").toLowerCase();
@@ -1655,22 +1720,25 @@ ShellRoot {
 
                             Process {
                                 id: fetchBatteryOptProc
+                                // List only packages that are NOT effectively restricted.
+                                // Restricted means:
+                                //   - standby bucket is 45 (STANDBY_BUCKET_RESTRICTED), or
+                                //   - both RUN_IN_BACKGROUND and RUN_ANY_IN_BACKGROUND are ignore/deny.
+                                // Previous code checked bucket == 50 (wrong) and treated deviceidle
+                                // whitelist as always-unrestricted, so restricted apps reappeared
+                                // after every refresh.
                                 command: [
                                     "bash", "-c",
-                                    "WHITELIST=$(adb shell dumpsys deviceidle whitelist 2>/dev/null | tr -d '\\r'); " +
-                                    "pkgs=$( (adb shell pm list packages -3 2>/dev/null; adb shell pm list packages 2>/dev/null | grep -iE 'package:com\\.google\\.|package:com\\.android\\.chrome') | sed 's/package://' | tr -d '\\r' | grep -vE '^com\\.(sec|samsung|android|qti|wssyncmldm)' | sort -u ); " +
+                                    "pkgs=$(adb shell pm list packages 2>/dev/null | sed 's/package://' | tr -d '\\r' | sort -u); " +
                                     "for pkg in $pkgs; do " +
-                                    "  [ -z \"$pkg\" ] && continue; " +
-                                    "  if echo \"$WHITELIST\" | grep -q \"$pkg\"; then " +
-                                    "    echo \"$pkg\"; " +
-                                    "  else " +
-                                    "    bucket=$(adb shell am get-standby-bucket \"$pkg\" 2>/dev/null | tr -d '\\r'); " +
-                                    "    if [ \"$bucket\" -eq 50 ] 2>/dev/null; then " +
-                                    "      continue; " +
-                                    "    else " +
-                                    "      echo \"$pkg\"; " +
-                                    "    fi; " +
-                                    "  fi; " +
+                                    "[ -z \"$pkg\" ] && continue; " +
+                                    "bucket=$(adb shell am get-standby-bucket \"$pkg\" 2>/dev/null | tr -d '\\r' | tr -d ' '); " +
+                                    "if [ \"$bucket\" = \"45\" ] || [ \"$bucket\" = \"restricted\" ]; then continue; fi; " +
+                                    "if [ -n \"$bucket\" ] && [ \"$bucket\" -ge 45 ] 2>/dev/null; then continue; fi; " +
+                                    "op1=$(adb shell appops get \"$pkg\" RUN_IN_BACKGROUND 2>/dev/null | tr -d '\\r'); " +
+                                    "op2=$(adb shell appops get \"$pkg\" RUN_ANY_IN_BACKGROUND 2>/dev/null | tr -d '\\r'); " +
+                                    "if echo \"$op1\" | grep -qiE 'ignore|deny' && echo \"$op2\" | grep -qiE 'ignore|deny'; then continue; fi; " +
+                                    "echo \"$pkg\"; " +
                                     "done"
                                 ]
 
@@ -1683,7 +1751,9 @@ ShellRoot {
                                         let battItems = [];
                                         for (let i = 0; i < lines.length; i++) {
                                             let rawPkg = lines[i].trim();
-                                            if (rawPkg.length > 0 && !isSystemCritical(rawPkg)) {
+                                            // Show preinstalled OEM apps (Camera, Calendar, Radio, …)
+                                            // but hide only truly critical packages (phone, contacts, UI, …)
+                                            if (rawPkg.length > 0 && !isBatteryListExcluded(rawPkg)) {
                                                 battItems.push({
                                                     displayName: formatDisplayName(rawPkg),
                                                     rawPkg: rawPkg,
@@ -1714,6 +1784,7 @@ ShellRoot {
                             Process {
                                 id: restrictBatteryProc
                                 property var cmdQueue: []
+                                property string pendingRemovePkg: ""
 
                                 function runNext() {
                                     if (cmdQueue.length > 0) {
@@ -1721,6 +1792,19 @@ ShellRoot {
                                         console.log("[BATTERY PROC EXEC]: " + nextCmd.join(" "));
                                         command = nextCmd;
                                         running = true;
+                                    } else if (pendingRemovePkg !== "") {
+                                        // Restriction queue finished – drop the package from the
+                                        // "unrestricted" list so it does not reappear until it is
+                                        // actually unrestricted again on a future refresh.
+                                        let pkg = pendingRemovePkg;
+                                        pendingRemovePkg = "";
+                                        for (let i = batteryOptimizationModel.count - 1; i >= 0; i--) {
+                                            if (batteryOptimizationModel.get(i).rawPkg === pkg) {
+                                                batteryOptimizationModel.remove(i);
+                                                console.log("[BATTERY OPT]: Removed restricted package from list:", pkg);
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1885,13 +1969,20 @@ ShellRoot {
                                                         onToggled: {
                                                             model.isToggledOn = batterySwitch.checked
                                                             let pkg = model.rawPkg
+                                                            // Invalidate cache so the next full refresh re-queries the device
+                                                            secureTabHelper.batteryListCached = false
                                                             if (!batterySwitch.checked) {
+                                                                // Put into deep sleep / restricted
+                                                                restrictBatteryProc.pendingRemovePkg = pkg
                                                                 restrictBatteryProc.cmdQueue = [
+                                                                    // Remove from deviceidle whitelist if present (otherwise restriction can be ignored)
+                                                                    ["adb", "shell", "dumpsys", "deviceidle", "whitelist", "-" + pkg],
                                                                     ["adb", "shell", "am", "set-standby-bucket", pkg, "restricted"],
                                                                     ["adb", "shell", "appops", "set", pkg, "RUN_IN_BACKGROUND", "ignore"],
                                                                     ["adb", "shell", "appops", "set", pkg, "RUN_ANY_IN_BACKGROUND", "ignore"]
                                                                 ]
                                                             } else {
+                                                                restrictBatteryProc.pendingRemovePkg = ""
                                                                 restrictBatteryProc.cmdQueue = [
                                                                     ["adb", "shell", "am", "set-standby-bucket", pkg, "working_set"],
                                                                     ["adb", "shell", "appops", "set", pkg, "RUN_IN_BACKGROUND", "allow"],
@@ -3986,13 +4077,20 @@ ShellRoot {
                             elide: Text.ElideMiddle
                         }
 
-                        // Safe to remove status
+                        // Safety verdict – label depends on which tab triggered the query
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
 
                             Text {
-                                text: "Safe to Remove:"
+                                text: {
+                                    if (!selectedAppInfo) return "Safe to Remove:";
+                                    let m = selectedAppInfo.queryMode || "debloat";
+                                    if (m === "battery") return "Safe to Restrict:";
+                                    if (m === "cammic") return "Safe to Revoke:";
+                                    if (m === "connection") return "Risk Level:";
+                                    return "Safe to Remove:";
+                                }
                                 color: "#b0ac63"
                                 font.pixelSize: 12
                                 font.family: "Monospace"
@@ -4001,7 +4099,11 @@ ShellRoot {
 
                             Text {
                                 text: selectedAppInfo ? selectedAppInfo.safeToRemove : ""
-                                color: selectedAppInfo ? (selectedAppInfo.safeToRemove === "Yes" ? "#88ff88" : (selectedAppInfo.safeToRemove === "No" ? "#ff7777" : "#ffff77")) : "#dde5a2"
+                                color: selectedAppInfo ? (
+                                    selectedAppInfo.safeToRemove === "Yes" || selectedAppInfo.safeToRemove === "Low" ? "#88ff88" :
+                                    selectedAppInfo.safeToRemove === "No" || selectedAppInfo.safeToRemove === "High" ? "#ff7777" :
+                                    "#ffff77"
+                                ) : "#dde5a2"
                                 font.pixelSize: 13
                                 font.bold: true
                                 font.family: "Monospace"
@@ -5074,16 +5176,22 @@ ShellRoot {
         Process {
             id: geminiDescProc
             property string currentPkg: ""
+            property string queryMode: "debloat"       // debloat | battery | cammic | connection
+            property string queryContext: ""
             command: []
 
             // Public entry point – discovers model on first call
-            function queryPkg(pkg) {
+            // mode: "debloat" (default), "battery", "cammic", "connection"
+            // context: optional display name or extra info for the prompt
+            function queryPkg(pkg, mode, context) {
                 currentPkg = pkg;
+                queryMode = mode || "debloat";
+                queryContext = context || "";
 
                 // Wait until the key has been loaded from disk
                 if (!geminiKeyLoaded) {
-                    // Key loader is still running – re-try shortly
-                    Qt.callLater(function() { geminiDescProc.queryPkg(pkg); });
+                    // Key loader is still running – re-try shortly (preserve mode/context)
+                    Qt.callLater(function() { geminiDescProc.queryPkg(pkg, mode, context); });
                     return;
                 }
 
@@ -5093,7 +5201,8 @@ ShellRoot {
                             pkg: pkg,
                             description: "No Gemini API key found.\n\nCreate the file:\n  ~/.config/debloat-phone/gemini.key\n(or place gemini.key next to this QML file)\nand put your free API key inside it (one line only).\n\nGet a key at: https://aistudio.google.com/apikey",
                             safeToRemove: "—",
-                            category: selectedAppInfo.category
+                            category: selectedAppInfo.category,
+                            queryMode: queryMode
                         };
                     }
                     return;
@@ -5107,7 +5216,8 @@ ShellRoot {
                             pkg: pkg,
                             description: "Discovering available Gemini models…",
                             safeToRemove: "…",
-                            category: selectedAppInfo.category
+                            category: selectedAppInfo.category,
+                            queryMode: queryMode
                         };
                     }
                     geminiListModelsProc.startDiscovery();
